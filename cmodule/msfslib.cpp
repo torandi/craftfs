@@ -3,10 +3,12 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <stddef.h>
 #include <map>
 #include <errno.h>
 #include <math.h>
 #include <string.h>
+#include <string>
 #include <assert.h>
 
 static std::map<const char *, addr_t> files;
@@ -117,20 +119,88 @@ addr_t find_entry(const char * in_path) {
 	if(addr != 0) {
 		files[in_path] = addr;
 	}
+	return addr;
 }
 
 addr_t find_entry_internal_path(const char ** path, addr_t node_addr) {
 	directory_entry_t * dir = get_directory(node_addr);
-	for(file_entry_t * cur_file = dir->file_list; cur_file->address != 0; ++cur_file) {
+	for(file_entry_t * cur_file = dir->file_list; cur_file != NULL; cur_file = cur_file->next) {
 		if(strcmp(path[0], cur_file->name) == 0) {
+			free_directory(dir);
 			if(path[1] == NULL)
 				return cur_file->address;
 			else
 				return find_entry_internal_path(path+1, cur_file->address);
 		}
 	}
-	printf("File entry not found: %s (in directory %i) \n", path[0], dir->attributes.st_ino);
+	printf("File entry not found: %s (in directory %lu) \n", path[0], dir->attributes.st_ino);
+	free_directory(dir);
 	return 0;
+}
+
+directory_entry_t * get_directory(const addr_t addr) {
+	char block[BLOCK_SIZE];
+	read_block(addr, block);
+	directory_entry_t * dir = (directory_entry_t*) malloc(sizeof(directory_entry_t));
+	dir->attributes = * ( (struct stat*) (block + offsetof(directory_entry_t, attributes)) );
+	dir->parent_addr = * ( (addr_t*) (block + offsetof(directory_entry_t, parent_addr)) );
+
+	fs_file_entry_t * cur_file = (fs_file_entry_t*) (block + offsetof(directory_entry_t, file_list));
+	if(cur_file->address == 0) {
+		dir->file_list = NULL;
+		return dir;
+	}
+
+	int name_len;
+	int npos;
+
+	file_entry_t * file = NULL;
+
+	while(cur_file->address != 0) {
+		if(cur_file->address > 2) {
+			//normal case, new file
+			file_entry_t * next_file = (file_entry_t*) malloc(sizeof(file_entry_t));
+			if(file != NULL) {
+				file->next = next_file;
+			} else {
+				dir->file_list = next_file;
+			}
+			file = next_file;
+
+			npos = 0;
+			name_len = DIR_ENTRY_NAME_LEN;
+
+			file->name = (char*) malloc(name_len);
+			file->address = cur_file->address;
+
+		} else if(cur_file->address == 2) {
+			//Continue directory entry at address in name:
+			addr_t *cont = (addr_t*) cur_file->name;
+			read_block(*cont, block);
+			cur_file = (fs_file_entry_t*) block;
+			continue;
+		}
+
+		if(npos + DIR_ENTRY_NAME_LEN > name_len) {
+			name_len *= 2;
+			file->name = (char*) realloc(file->name, name_len);
+		}
+		memcpy(file->name + npos, cur_file->name, DIR_ENTRY_NAME_LEN);
+		npos += DIR_ENTRY_NAME_LEN;
+		++cur_file;
+
+	}
+	return dir;
+}
+
+void free_directory(directory_entry_t * dir) {
+	for(file_entry_t * cur_file = dir->file_list; cur_file != NULL; ) {
+		free(cur_file->name);
+		file_entry_t * next_file = cur_file->next;
+		free(cur_file);
+		cur_file = next_file;
+	}
+	free(dir);
 }
 
 static void check_fbl_size(int index) {

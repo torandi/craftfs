@@ -42,16 +42,19 @@ int msfs_error = 0;
 #define FREE_BLOCK_LIST_SIZE ( BLOCK_SIZE - ADDR_SIZE )
 #define FREE_BLOCK_LIST_BLOCKS ( FREE_BLOCK_LIST_SIZE * 8 )
 
+#define DIR_ENTRY_NAME_LEN 12
+
 //Special for the file system
 struct fs_file_entry_t {
 	addr_t address;
-	char name[12];
+	char name[DIR_ENTRY_NAME_LEN];
 };
 
 //Abstracted
 struct file_entry_t {
 	addr_t address;
 	char * name;
+	file_entry_t * next;
 };
 
 struct directory_entry_t {
@@ -87,6 +90,9 @@ addr_t find_entry(const char * path);
 directory_entry_t * get_directory(const addr_t addr);
 void free_directory(directory_entry_t * dir);
 void write_directory(directory_entry_t * dir);
+
+directory_entry_t * create_directory(directory_entry_t * dir, const char * name, mode_t mode);
+void delete_directory(directory_entry_t * dir);
 
 inode_t read_inode(addr_t addr);
 void write_inode(addr_t addr, const inode_t * inode);
