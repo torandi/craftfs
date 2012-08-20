@@ -19,7 +19,7 @@
 #define DATA_START 2
 
 
-typedef addr_t uint32;
+typedef uint32_t addr_t;
 
 #define ADDR_SIZE sizeof(addr_t)
 
@@ -45,14 +45,14 @@ int msfs_error = 0;
 //Special for the file system
 struct fs_file_entry_t {
 	addr_t address;
-	char[12] name;
-}
+	char name[12];
+};
 
 //Abstracted
 struct file_entry_t {
 	addr_t address;
 	char * name;
-}
+};
 
 struct directory_entry_t {
 	struct stat attributes;
@@ -62,18 +62,21 @@ struct directory_entry_t {
 
 struct inode_t {
 	struct stat attributes;
-	addr_t[10] block_addr;
+	addr_t block_addr[10];
 	addr_t next_block;
 };
 
-static struct fbl_pos_t {
+struct fbl_pos_t {
 	int index;
 	short char_index;
 	short bit_pos;
-}
+};
+
+void init();
+void cleanup();
 
 void read_block(addr_t address, char* data);
-void write_block(addr_t address, char* data);
+void write_block(addr_t address, const char* data);
 
 addr_t next_free_block(const addr_t prev, fbl_pos_t * fbl_pos);
 void mark_block_from_pos(const fbl_pos_t * fbl_pos, char bit);
@@ -90,6 +93,8 @@ void write_inode(addr_t addr, const inode_t * inode);
 
 char * read_file(const inode_t * inode, addr_t addr, addr_t size);
 int write_file(const inode_t * inode, addr_t addr, addr_t size);
+inode_t create_file(directory_entry_t * dir, const char* name, mode_t mode);
+void delete_file(inode_t * inode);
 
 void delete_block(addr_t addr); //remember to check if fbl == 0
 addr_t allocate_block();
@@ -98,8 +103,5 @@ addr_t allocate_block_cont(addr_t prev); //Start at given addr
 //Called on new systems to create initial structure
 void format();
 
-void init();
-
-void cleanup();
 
 #endif

@@ -1,14 +1,20 @@
-#include "msfbl.h"
+#include "msfslib.h"
+#include "io.h"
 
+#include <cstdio>
 #include <cstdlib>
 #include <map>
+#include <errno.h>
+#include <math.h>
+#include <string.h>
+#include <assert.h>
 
 static std::map<const char *, addr_t> files;
 
 static addr_t * fbl_addr;
 static int num_fbls, num_alloc_fbls; //Actual number, allocated in local list, num_alloc >= num_fbls
 
-static char[BLOCK_SIZE] active_fbl;
+static char active_fbl[BLOCK_SIZE];
 static int active_fbl_index;
 
 // Split path into parts
@@ -19,11 +25,15 @@ static void free_path(char ** path);
 static addr_t find_entry_internal_path(const char ** path, addr_t node);
 
 static void read_fbl_addresses();
+static void fill_fbl_addr();
+static char* get_fbl(int index);
+
+static char** split_path(char * path);
 
 static char * zeroes; //BLOCK_SIZE of zeros
 
 void init() {
-	zeroes = calloc(BLOCK_SIZE, 1);
+	zeroes = (char*) calloc(BLOCK_SIZE, 1);
 
 	fbl_addr = (addr_t*) malloc( sizeof(addr_t) * 5 );
 	num_alloc_fbls = 5;
@@ -39,6 +49,18 @@ void cleanup() {
 	free(fbl_addr);
 }
 
+void read_block(addr_t address, char * data) {
+	if(io_read(address, data)) {
+		msfs_error = -EIO;
+	}
+}
+
+void write_block(addr_t address, const char * data) {
+	if(io_write(address, data)) {
+		msfs_error = -EIO;
+	}
+}
+
 addr_t allocate_block() {
 	return allocate_block_cont(DATA_START);
 }
@@ -51,6 +73,64 @@ addr_t allocate_block_cont(addr_t prev) {
 	//Mark block in use
 	mark_block_from_pos(&fbl_pos, 1);
 	return addr;
+}
+
+static char** split_path(char * path) {
+	int num_parts = 1;
+	char * found;
+
+	found = strchr(path+1, '/');
+	while(found != NULL) {
+		++num_parts;
+		found = strchr(found + 1, '/');
+	}
+	++num_parts;
+
+
+	char ** parts = (char**) malloc(sizeof(char*) * num_parts);
+	int index = 0;
+	found = strtok(path + 1, "/");
+	while(found != NULL) {
+		parts[index++] = found;
+		found = strtok(NULL, "/");
+	}
+	parts[num_parts - 1] = NULL;
+
+	return parts;
+}
+
+addr_t find_entry(const char * in_path) {
+	std::map<const char*, addr_t>::iterator it = files.find(in_path);
+	if(it != files.end()) return it->second;
+
+	assert(in_path[0] == '/');
+
+	char path[strlen(in_path)-1];
+	strcpy(path, in_path+1);
+
+	char ** parts = split_path(path);
+
+	addr_t addr = find_entry_internal_path((const char**) parts, ROOT_NODE);
+
+	free(parts);
+
+	if(addr != 0) {
+		files[in_path] = addr;
+	}
+}
+
+addr_t find_entry_internal_path(const char ** path, addr_t node_addr) {
+	directory_entry_t * dir = get_directory(node_addr);
+	for(file_entry_t * cur_file = dir->file_list; cur_file->address != 0; ++cur_file) {
+		if(strcmp(path[0], cur_file->name) == 0) {
+			if(path[1] == NULL)
+				return cur_file->address;
+			else
+				return find_entry_internal_path(path+1, cur_file->address);
+		}
+	}
+	printf("File entry not found: %s (in directory %i) \n", path[0], dir->attributes.st_ino);
+	return 0;
 }
 
 static void check_fbl_size(int index) {
@@ -100,8 +180,8 @@ void mark_block_from_pos(const fbl_pos_t * fbl_pos, char bit) {
 	}
 
 	char * fbl = get_fbl(fbl_pos->index);
-	char * c =  + (ADDR_SIZE + fbl_pos->char_index);
-	if(read_bit(*c) == bit) return;
+	char * c = fbl + (ADDR_SIZE + fbl_pos->char_index);
+	if(read_bit(*c, fbl_pos->bit_pos) == bit) return;
 	//We know the bit shall be flipped, and can just xor it with 1
 	*c ^= 1 << fbl_pos->bit_pos; 
 	//Write the block:
@@ -110,10 +190,10 @@ void mark_block_from_pos(const fbl_pos_t * fbl_pos, char bit) {
 
 void mark_block(const addr_t addr, char bit) {
 	fbl_pos_t pos;
-	pos.index = cur / FREE_BLOCK_LIST_BLOCKS;
+	pos.index = addr / FREE_BLOCK_LIST_BLOCKS;
 	addr_t internal_pos = addr % FREE_BLOCK_LIST_BLOCKS;
 	pos.char_index = (int) floor(internal_pos / 8);
-	pos.bit_pos = internal_pos % FREE_BLOCK_SIZE;
+	pos.bit_pos = internal_pos % FREE_BLOCK_LIST_SIZE;
 
 	mark_block_from_pos(&pos, bit);
 }
@@ -124,7 +204,7 @@ addr_t next_free_block(const addr_t prev, fbl_pos_t * fbl_pos) {
 	while(fbl_index < num_fbls) {
 		addr_t internal_pos = cur % FREE_BLOCK_LIST_BLOCKS;
 		short char_index = (int) floor(internal_pos / 8);
-		short bit_pos = internal_pos % FREE_BLOCK_SIZE;
+		short bit_pos = internal_pos % FREE_BLOCK_LIST_SIZE;
 		if( read_bit( get_fbl(fbl_index)[ADDR_SIZE + char_index], bit_pos) == 0) {
 			fbl_pos->index = fbl_index;
 			fbl_pos->char_index = char_index;
@@ -141,3 +221,5 @@ addr_t next_free_block(const addr_t prev, fbl_pos_t * fbl_pos) {
 	
 	return cur;
 }
+
+

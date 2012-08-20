@@ -1,4 +1,6 @@
-CFLAGS=-D_FILE_OFFSET_BITS=64
+CFLAGS=-Wall `pkg-config fuse --cflags --libs`
 
-msfslib.o:
-	gcc $(CFLAGS) msfslib.cpp -o msfslib.o
+all: msfs
+
+msfs:
+	g++ $(CFLAGS) msfslib.cpp -o msfs

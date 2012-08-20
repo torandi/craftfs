@@ -1,6 +1,10 @@
+#ifndef IO_H
+#define IO_H
+
 #include "msfslib.h"
 
-char * read(addr_t addr, addr_t size);
+int io_read(addr_t addr, char * data);
 
-void write(addr_t addr, addr_t size, const char * data);
+int io_write(addr_t addr, const char * data);
 
+#endif
