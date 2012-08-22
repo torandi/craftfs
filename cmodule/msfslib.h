@@ -79,16 +79,20 @@ file_entry_t * find_entry(const char * path);
 
 inode_t read_inode(addr_t addr);
 void write_inode(inode_t * inode);
-void delete_inode(inode_t * inode);
 inode_t create_inode(inode * in_dir, const char* name, mode_t mode);
 
+void delete_file_entry(file_entry_t * file);
+void add_file_entry(file_entry_t * file, inode_t * dir);
+
 void read_inode_data(const inode_t * inode, size_t offset, size_t size, char * data);
-int write_inode_data(const inode_t * inode, size_t offset, size_t size, const char * data);
+int write_inode_data(inode_t * inode, size_t offset, size_t size, const char * data); //This one can change block count in inode
 
 int is_directory(const inode_t * inode);
 //Addresses are relative, addr is updated to point to next file entry afterwards, returns NULL on eol
 file_entry_t * next_file_entry(const inode * inode, addr_t * addr);
 void free_file_entry(file_entry_t * entry);
+
+unsigned int file_count(const inode_t *inode);
 
 addr_t allocate_block();
 addr_t allocate_block_cont(addr_t prev); //Start at given addr

@@ -37,12 +37,16 @@ static char ** split_path( const char * path);
 // Free path created by split_path
 static void free_path(char ** path);
 
+static unsigned int file_count_abort(const inode_t *inode, unsigned int abort_at);
+
 static file_entry_t * find_entry_internal_path(const char ** path, addr_t node);
 static file_entry_t * find_entry_in_dir(const char * name, const inode_t * inode);
 
 static void read_fbl_addresses();
 static void fill_fbl_addr();
 static char* get_fbl(int index);
+
+static void delete_inode(inode_t * inode);
 
 /*
  * An internal adress in an inode
@@ -193,7 +197,7 @@ file_entry_t * find_entry(const char * in_path) {
 static file_entry_t * find_entry_in_dir(const char * name, const inode_t * inode) {
 	addr_t cur_addr = 0;
 	file_entry_t * entry;
-	for(entry = next_file(inode, &cur_addr); entry != NULL; entry = next_file(inode, &cur_addr)) {
+	for(entry = next_file_entry(inode, &cur_addr); entry != NULL; entry = next_file_entry(inode, &cur_addr)) {
 		if(strcmp(name, entry->name) == 0) {
 			return entry;
 		}
@@ -274,10 +278,78 @@ void write_inode(inode_t * inode) {
 	write_data((addr_t) inode->attibutes.st_ino, (const char*)inode, sizeof(inode_t));
 }
 
-void delete_inode(inode_t * inode) {
-	//find parent directory:
+void delete_file_entry(file_entry_t * file) {
+	inode_t directory = read_inode(file->parent);
+	inode_t file = read_inode(file->address);
+	
+	if(!is_directory(&directory)) {
+		msfs_error = -ENOTDIR;
+		return;
+	}
+
+	if(is_directory(&file) && file_count_abort(&file, 1) > 0) {
+		msfs_error = -ENOTEMPTY;
+		return;
+	}
+
+	if(strcmp(file->name, "..") == 0) {
+		printf("Can not delete ..\n");
+		msfs_error = -EPERM;
+		return;
+	}
+
+	//Remove from directory listing:
+	
+	char * data = (char*) malloc(directory.attibutes.st_size);
+	addr_t next = 0;
+
+	file_entry_t * entry;
+
+	while( 1 ) {
+		read_inode_data(inode, next, (sizeof(addr_t) * 2), data + next);
+		entry = (file_entry_t*) (data + next);
+		if(entry->len == 0) break;
+
+		next += sizeof(addr_t) * 2;
+		read_inode_data(inode, next, entry->len, data + next);
+		if(strncmp(data + next, file->name, strlen(file->name)) == 0) {
+			next -= sizeof(addr_t) * 2; //don't include this
+		} else {
+			next += entry->len;
+		}
+	}
+
+	directory.attibutes.st_size -= sizeof(addr_t)*2 + file.len;
+	write_inode_data(&directory, 0, directory.attibutes.st_size, data);
+	write_inode(&directory);
+	--file.st_nlink;
+	if(is_directory(&file) || file.st_nlink == 0) {
+		delete_inode(&file);
+	} else {
+		write_inode(&file);
+	}
 }
 
+void add_file_entry(file_entry_t * file, inode_t * dir) {
+	size_t cur_size = dir->attibutes.st_size;
+	if(!is_directory(dir)) {
+		msfs_error = -ENOTDIR;
+		return inode;
+	}
+
+	write_inode_data(dir, cur_size, sizeof(addr_t)*2, file);
+	cur_size += sizeof(addr_t) * 2;
+	write_inode_data(dir, cur_size, file->len , file->name);
+	cur_size += file->len;
+	dir->attibutes.st_size = file->len;
+	dir->attibutes.st_mtime = time();
+
+	write_inode(dir);
+
+	inode_t f_inode = read_inode(file->address);
+	f_inode->attibutes.st_nlink += 1;
+	write_inode(f_inode);
+}
 
 inode_t create_inode(inode * in_dir, const char* name, mode_t mode) {
 	inode_t inode;
@@ -295,7 +367,7 @@ inode_t create_inode(inode * in_dir, const char* name, mode_t mode) {
 
 	inode.attibutes.st_ino = allocate_block();
 	inode.next_block = 0;
-	inode.attibutes.st_blocks = 1;
+	inode.attibutes.st_blocks = 0;
 	inode.attibutes.st_atime = time();
 	inode.attibutes.st_mtime = time();
 	inode.attibutes.st_ctime = time();
@@ -307,6 +379,22 @@ inode_t create_inode(inode * in_dir, const char* name, mode_t mode) {
 	write_inode(&inode);
 }
 
+static void delete_inode_helper(inode_t * inode, unsigned int remaining_blocks) {
+	unsigned int blocks = min(INODE_BLOCKS, remaining_blocks);
+	for(int i=0; i<blocks; ++i) {
+		delete_block(inode.block_addr[i]);
+	}
+	if(blocks > INODE_BLOCKS && inode->next_block != 0) {
+		delete_inode_helper(inode->next_block, remaining_blocks - INODE_BLOCKS);
+	}
+	delete_block(inode->st_ino);
+}
+
+static void delete_inode(inode_t * inode) {
+	delete_inode_helper(inode, inode->attibutes.st_blocks);
+}
+
+
 char * read_inode_data(const inode_t * inode, size_t offset, size_t size, char * data) {
 	
 }
@@ -317,101 +405,6 @@ int write_inode_data(const inode_t * inode, size_t offset, size_t size, const ch
 
 int is_directory(const inode_t * inode) {
 	return (inode->attibutes.st_mode & S_IFDIR);
-}
-
-directory_entry_t * get_directory(const addr_t addr) {
-	int cur_block = 0;
-	read_block(addr, block);
-	directory_entry_t * dir = (directory_entry_t*) malloc(sizeof(directory_entry_t));
-	dir->attributes = * ( (struct stat*) (block + offsetof(directory_entry_t, attributes)) );
-	dir->parent_addr = * ( (addr_t*) (block + offsetof(directory_entry_t, parent_addr)) );
-	dir->num_files = 0;
-	dir->num_file_entries = 1;
-	dir->blocks = (addr_t*) malloc(dir->attributes.st_blocks * sizeof(addr_t));
-	dir->blocks[0] = addr;
-	++cur_block;
-
-	fs_file_entry_t * cur_file = (fs_file_entry_t*) (block + offsetof(directory_entry_t, file_list));
-	if(cur_file->address == 0) {
-		dir->file_list = NULL;
-		return dir;
-	}
-
-	++dir->num_files;
-
-	int name_len;
-	int npos;
-
-	file_entry_t * file = NULL;
-
-	while(cur_file->address != 0) {
-		++dir->num_file_entries;
-		if(cur_file->address > 2) {
-			//normal case, new file
-			file_entry_t * next_file = (file_entry_t*) malloc(sizeof(file_entry_t));
-			if(file != NULL) {
-				file->next = next_file;
-			} else {
-				dir->file_list = next_file;
-			}
-			file = next_file;
-
-			npos = 0;
-			name_len = DIR_ENTRY_NAME_LEN;
-
-			file->name = (char*) malloc(name_len);
-			file->address = cur_file->address;
-
-			++dir->num_files;
-
-		} else if(cur_file->address == 2) {
-			//Continue directory entry at address in name:
-			addr_t *cont = (addr_t*) cur_file->name;
-			read_block(*cont, block);
-			dir->block[cur_block++] = *cont;
-			cur_file = (fs_file_entry_t*) block;
-			continue;
-		}
-
-		if(npos + DIR_ENTRY_NAME_LEN > name_len) {
-			name_len *= 2;
-			file->name = (char*) realloc(file->name, name_len);
-		}
-		memcpy(file->name + npos, cur_file->name, DIR_ENTRY_NAME_LEN);
-		npos += DIR_ENTRY_NAME_LEN;
-		++cur_file;
-
-	}
-	return dir;
-}
-
-void free_directory(directory_entry_t * dir) {
-	for(file_entry_t * cur_file = dir->file_list; cur_file != NULL; ) {
-		free(cur_file->name);
-		file_entry_t * next_file = cur_file->next;
-		free(cur_file);
-		cur_file = next_file;
-	}
-	free(blocks);
-	free(dir);
-}
-
-void write_directory(directory_entry_t * dir) {
-	addr_t addr = dir->attributes.st_ino;
-	int extra_blocks = dir->num_file_entries - FILE_ENTRIES_IN_FIRST_BLOCK;
-	char * data = (char*) malloc(BLOCK_SIZE * (extra_blocks + 1) );
-
-	memcpy(data, dir->attributes, sizeof(struct stat));
-	memcpy(data, dir->parent_addr, sizeof(addr_t));
-
-	int file_entries_left_in_block = FILE_ENTRIES_IN_FIRST_BLOCK;
-
-	fs_file_entry_t fe;
-
-	for( file_entry_t * f = dir->file_list; f != NULL; f = f->next ) {
-		memcpy(data, 
-	}
-
 }
 
 static void check_fbl_size(int index) {
@@ -503,3 +496,25 @@ addr_t next_free_block(const addr_t prev, fbl_pos_t * fbl_pos) {
 	return cur;
 }
 
+unsigned int file_count(const inode_t *inode) {
+	return file_count_abort(inode, 0);
+}
+
+static unsigned int file_count_abort(const inode_t *inode, unsigned int abort_at) {
+	unsigned int count = 0;
+	int loop = 1;
+	file_entry_t entry;
+	addr_t addr = 0;
+	while(loop) {
+		read_inode_data(inode, addr, (sizeof(addr_t) * 2), &entry);
+		if(entry.len == 0) {
+			loop = 0;
+		} else {
+			addr += (sizeof(addr_t) * 2) + entry.len;
+			++count;
+
+			if(abort_at > 0 && (count - 1) >= abort_at) return abort_at;
+		}
+	}
+	return (count - 1); // -1 to remove ..
+}
