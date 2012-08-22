@@ -10,8 +10,21 @@
 #include <string.h>
 #include <string>
 #include <assert.h>
+#include <time.h>
 
 static std::map<const char *, addr_t> files;
+
+static struct cache_entry {
+	addr_t addr;
+	char data[BLOCK_SIZE];
+	int valid;
+}
+
+#define CACHE_SIZE 10
+
+cache_entry block_cache[CACHE_SIZE];
+
+static int next_cache_entry_fill = 0;
 
 static addr_t * fbl_addr;
 static int num_fbls, num_alloc_fbls; //Actual number, allocated in local list, num_alloc >= num_fbls
@@ -24,18 +37,54 @@ static char ** split_path( const char * path);
 // Free path created by split_path
 static void free_path(char ** path);
 
-static addr_t find_entry_internal_path(const char ** path, addr_t node);
+static file_entry_t * find_entry_internal_path(const char ** path, addr_t node);
+static file_entry_t * find_entry_in_dir(const char * name, const inode_t * inode);
 
 static void read_fbl_addresses();
 static void fill_fbl_addr();
 static char* get_fbl(int index);
 
+/*
+ * An internal adress in an inode
+ */
+static struct inode_addr_t {
+	unsigned int block_index;
+	addr_t block_addr;
+	addr_t addr_in_block;
+}
+
+//Addr is relative start of data in inode
+static inode_addr_t find_addr_in_inode(const inode * inode, size_t addr);
+
 static char** split_path(char * path);
 
 static char * zeroes; //BLOCK_SIZE of zeros
+static char * block; //Always block_size big. Used for sending data that is less than BLOCK_SIZE
+
+static cache_entry * find_or_create_cache_entry(addr_t address) {
+	for(int i = 0; i< CACHE_SIZE; ++i) {
+		if(address == block_cache[i].addr) {
+			return block_cache + i;
+		}
+	}
+	cache_entry * entry = block_cache[next_cache_entry_fill++];
+	entry->addr = address;
+	entry->valid = 0;
+	next_cache_entry_fill = next_cache_entry_fill % 10;
+
+	return entry;
+}
 
 void init() {
+
 	zeroes = (char*) calloc(BLOCK_SIZE, 1);
+	block = (char*) calloc(BLOCK_SIZE, 1);
+
+	cache_entry empty;
+	empty.valid = 0;
+	for(int i = 0; i< CACHE_SIZE; ++i) {
+		block_cache[i] = empty;
+	}
 
 	fbl_addr = (addr_t*) malloc( sizeof(addr_t) * 5 );
 	num_alloc_fbls = 5;
@@ -48,18 +97,37 @@ void init() {
 
 void cleanup() {
 	free(zeroes);
+	free(block);
 	free(fbl_addr);
 }
 
 void read_block(addr_t address, char * data) {
-	if(io_read(address, data)) {
+	cache_entry * cache = find_or_create_cache_entry(address);
+	if(cache->valid == 0 && io_read(address, cache->data)) { //Only read if cache entry was invalid
+		msfs_error = -EIO;
+		return;
+	}
+
+	memcpy(data, cache->data, BLOCK_SIZE);
+	cache->valid = 1;
+}
+
+void write_block(addr_t address, const char * data) {
+	cache_entry * cache = find_or_create_cache_entry(address);
+	memcpy(cache->data, data, BLOCK_SIZE);
+	cache->valid = 1;
+	if(io_write(address, data)) {
 		msfs_error = -EIO;
 	}
 }
 
-void write_block(addr_t address, const char * data) {
-	if(io_write(address, data)) {
-		msfs_error = -EIO;
+void write_data(addr_t address, const char* data, size_t size) {
+	assert(size <= BLOCK_SIZE);
+	if(size == BLOCK_SIZE) {
+		write_block(address, data);
+	} else {
+		memcpy(block, data, size);
+		write_block(address, block);
 	}
 }
 
@@ -101,7 +169,7 @@ static char** split_path(char * path) {
 	return parts;
 }
 
-addr_t find_entry(const char * in_path) {
+file_entry_t * find_entry(const char * in_path) {
 	std::map<const char*, addr_t>::iterator it = files.find(in_path);
 	if(it != files.end()) return it->second;
 
@@ -112,7 +180,7 @@ addr_t find_entry(const char * in_path) {
 
 	char ** parts = split_path(path);
 
-	addr_t addr = find_entry_internal_path((const char**) parts, ROOT_NODE);
+	file_entry_t * entry= find_entry_internal_path((const char**) parts, ROOT_NODE);
 
 	free(parts);
 
@@ -122,6 +190,39 @@ addr_t find_entry(const char * in_path) {
 	return addr;
 }
 
+static file_entry_t * find_entry_in_dir(const char * name, const inode_t * inode) {
+	addr_t cur_addr = 0;
+	file_entry_t * entry;
+	for(entry = next_file(inode, &cur_addr); entry != NULL; entry = next_file(inode, &cur_addr)) {
+		if(strcmp(name, entry->name) == 0) {
+			return entry;
+		}
+		free_file_entry(entry);
+	}
+}
+
+file_entry_t * next_file_entry(const inode * inode, addr_t * addr) {
+	file_entry_t * entry = (file_entry_t*) malloc(sizeof(file_entry_t));
+	read_inode_data(inode, *addr, (sizeof(addr_t) * 2), entry);
+	if(entry->len == 0) {
+		free(entry);
+		return NULL;
+	} else {
+		entry->name = (char*) malloc(entry->len);
+		*addr += sizeof(addr_t) *2;
+		read_inode_data(inode, *addr, entry->len , entry->name);
+		*addr += entry->len;
+		entry->parent = inode->attributes.st_ino;
+		return entry;
+	}
+}
+
+void free_file_entry(file_entry_t * entry) {
+	free(entry->name);
+	free(entry);
+}
+
+/*
 addr_t find_entry_internal_path(const char ** path, addr_t node_addr) {
 	directory_entry_t * dir = get_directory(node_addr);
 	for(file_entry_t * cur_file = dir->file_list; cur_file != NULL; cur_file = cur_file->next) {
@@ -137,13 +238,98 @@ addr_t find_entry_internal_path(const char ** path, addr_t node_addr) {
 	free_directory(dir);
 	return 0;
 }
+*/
+
+//Addr is relative start of data in inode
+static inode_addr_t find_addr_in_inode(const inode_t * inode, size_t addr) {
+
+	inode_addr_t ret;
+	ret.block_index = floor(addr/BLOCK_SIZE);
+	unsigned int inode_index = ret.block_index / INODE_BLOCKS;
+	inode_t * block_node = inode;
+	for(; inode_index > 0; --inode_index) {
+		if(block_node->next_block == 0) {
+			msfs_error = -EFAULT;
+			printf("Error: Trying to find address in inode, outside inode's address space (address: %d, block index: %d)\n", addr, ret.block_index);
+			return ret;
+		}
+		read_block(block_node->next_block, block_cache);
+		block_node = (inode_t*) block_cache;
+	}
+
+	ret.block_addr = block_node.block_addr[ret.block_index];
+	ret.addr_in_block = (addr % BLOCK_SIZE);
+	
+	return ret;
+}
+
+inode_t read_inode(addr_t addr) {
+	read_block(addr, block);
+	inode_t inode;
+	memcpy(&inode, block, sizeof(inode_t));
+	return inode;
+}
+
+void write_inode(inode_t * inode) {
+	write_data((addr_t) inode->attibutes.st_ino, (const char*)inode, sizeof(inode_t));
+}
+
+void delete_inode(inode_t * inode) {
+	//find parent directory:
+}
+
+
+inode_t create_inode(inode * in_dir, const char* name, mode_t mode) {
+	inode_t inode;
+	if(!is_directory(in_dir)) {
+		msfs_error = -ENOTDIR;
+		return inode;
+	}
+	//First check if file exists in directory
+	file_entry_t * entry = find_entry_in_dir(name, in_dir);
+	if(entry != NULL) {
+		free_file_entry(entry);
+		msfs_error = -EEXIST;
+		return inode;
+	}
+
+	inode.attibutes.st_ino = allocate_block();
+	inode.next_block = 0;
+	inode.attibutes.st_blocks = 1;
+	inode.attibutes.st_atime = time();
+	inode.attibutes.st_mtime = time();
+	inode.attibutes.st_ctime = time();
+	inode.attibutes.st_nlink = 0;
+	inode.attibutes.st_size = 0;
+	inode.attibutes.st_blksize = BLOCK_SIZE;
+	inode.attibutes.st_mode = mode;
+
+	write_inode(&inode);
+}
+
+char * read_inode_data(const inode_t * inode, size_t offset, size_t size, char * data) {
+	
+}
+
+int write_inode_data(const inode_t * inode, size_t offset, size_t size, const char * data) {
+
+}
+
+int is_directory(const inode_t * inode) {
+	return (inode->attibutes.st_mode & S_IFDIR);
+}
 
 directory_entry_t * get_directory(const addr_t addr) {
-	char block[BLOCK_SIZE];
+	int cur_block = 0;
 	read_block(addr, block);
 	directory_entry_t * dir = (directory_entry_t*) malloc(sizeof(directory_entry_t));
 	dir->attributes = * ( (struct stat*) (block + offsetof(directory_entry_t, attributes)) );
 	dir->parent_addr = * ( (addr_t*) (block + offsetof(directory_entry_t, parent_addr)) );
+	dir->num_files = 0;
+	dir->num_file_entries = 1;
+	dir->blocks = (addr_t*) malloc(dir->attributes.st_blocks * sizeof(addr_t));
+	dir->blocks[0] = addr;
+	++cur_block;
 
 	fs_file_entry_t * cur_file = (fs_file_entry_t*) (block + offsetof(directory_entry_t, file_list));
 	if(cur_file->address == 0) {
@@ -151,12 +337,15 @@ directory_entry_t * get_directory(const addr_t addr) {
 		return dir;
 	}
 
+	++dir->num_files;
+
 	int name_len;
 	int npos;
 
 	file_entry_t * file = NULL;
 
 	while(cur_file->address != 0) {
+		++dir->num_file_entries;
 		if(cur_file->address > 2) {
 			//normal case, new file
 			file_entry_t * next_file = (file_entry_t*) malloc(sizeof(file_entry_t));
@@ -173,10 +362,13 @@ directory_entry_t * get_directory(const addr_t addr) {
 			file->name = (char*) malloc(name_len);
 			file->address = cur_file->address;
 
+			++dir->num_files;
+
 		} else if(cur_file->address == 2) {
 			//Continue directory entry at address in name:
 			addr_t *cont = (addr_t*) cur_file->name;
 			read_block(*cont, block);
+			dir->block[cur_block++] = *cont;
 			cur_file = (fs_file_entry_t*) block;
 			continue;
 		}
@@ -200,7 +392,26 @@ void free_directory(directory_entry_t * dir) {
 		free(cur_file);
 		cur_file = next_file;
 	}
+	free(blocks);
 	free(dir);
+}
+
+void write_directory(directory_entry_t * dir) {
+	addr_t addr = dir->attributes.st_ino;
+	int extra_blocks = dir->num_file_entries - FILE_ENTRIES_IN_FIRST_BLOCK;
+	char * data = (char*) malloc(BLOCK_SIZE * (extra_blocks + 1) );
+
+	memcpy(data, dir->attributes, sizeof(struct stat));
+	memcpy(data, dir->parent_addr, sizeof(addr_t));
+
+	int file_entries_left_in_block = FILE_ENTRIES_IN_FIRST_BLOCK;
+
+	fs_file_entry_t fe;
+
+	for( file_entry_t * f = dir->file_list; f != NULL; f = f->next ) {
+		memcpy(data, 
+	}
+
 }
 
 static void check_fbl_size(int index) {
@@ -291,5 +502,4 @@ addr_t next_free_block(const addr_t prev, fbl_pos_t * fbl_pos) {
 	
 	return cur;
 }
-
 
