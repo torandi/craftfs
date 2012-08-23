@@ -47,6 +47,7 @@ struct file_entry_t {
 	addr_t address;
 	addr_t parent_inode;
 	char * name;
+	char * path;
 };
 
 #define INODE_BLOCKS ( ( BLOCK_SIZE - sizeof(addr_t) - sizeof(struct stat)) / sizeof(addr_t) )
@@ -63,40 +64,44 @@ struct fbl_pos_t {
 	short bit_pos;
 };
 
-void init();
+void init(const char * option);
 void cleanup();
+
+void reset_error() { msfs_error = 0; }
 
 void read_block(addr_t address, char* data);
 void write_block(addr_t address, const char* data);
 
-void write_data(addr_t address, const char* data, size_t size);
+//Note that offset + size must be less or equal to BLOCK_SIZE
+void write_data(addr_t address, const char* data, size_t offset, size_t size);
 
 addr_t next_free_block(const addr_t prev, fbl_pos_t * fbl_pos);
 void mark_block_from_pos(const fbl_pos_t * fbl_pos, char bit);
-void mark_block(const addr_t addr, char bit);
+fbl_pos_t mark_block(const addr_t addr, char bit);
 
 file_entry_t * find_entry(const char * path);
+file_entry_t * clone_entry(const file_entry_t * entry);
 
 inode_t read_inode(addr_t addr);
 void write_inode(inode_t * inode);
-inode_t create_inode(inode * in_dir, const char* name, mode_t mode);
+inode_t create_inode(inode_t * in_dir, const char* name, mode_t mode);
 
-void delete_file_entry(file_entry_t * file);
+void delete_file_entry(file_entry_t * file); //This also frees the file_entry
 void add_file_entry(file_entry_t * file, inode_t * dir);
 
-void read_inode_data(const inode_t * inode, size_t offset, size_t size, char * data);
+int read_inode_data(inode_t * inode, size_t offset, size_t size, char * data);
 int write_inode_data(inode_t * inode, size_t offset, size_t size, const char * data); //This one can change block count in inode
 
 int is_directory(const inode_t * inode);
 //Addresses are relative, addr is updated to point to next file entry afterwards, returns NULL on eol
-file_entry_t * next_file_entry(const inode * inode, addr_t * addr);
+file_entry_t * next_file_entry(inode_t * inode, addr_t * addr);
 void free_file_entry(file_entry_t * entry);
 
-unsigned int file_count(const inode_t *inode);
+unsigned int file_count(inode_t *inode);
 
 addr_t allocate_block();
 addr_t allocate_block_cont(addr_t prev); //Start at given addr
-void delete_block(addr_t addr); //remember to check if fbl == 0
+void delete_block(addr_t addr);
 
 //Called on new systems to create initial structure
 void format();
