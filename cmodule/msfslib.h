@@ -1,16 +1,21 @@
 #ifndef MSFSLIB_H
 #define MSFSLIB_H
 
-#define FUSE_USE_VERSION 26
+#define FUSE_USE_VERSION 28
 #include <fuse.h>
 #include <limits.h>
 #include <sys/stat.h>
 
 #define BLOCK_SIZE 512
 
+#define VERSION 0
+#define HEADER_TEXT "minecraft-fs"
+
 #define IN_BLOCK_SIZE(size) (size)/BLOCK_SIZE
 
 #define MAX_BLOCKS UINT_MAX
+
+#define SIGNATURE_BLOCK 0
 
 #define ROOT_FBL 1
 
@@ -23,11 +28,11 @@ typedef uint32_t addr_t;
 
 #define ADDR_SIZE sizeof(addr_t)
 
-int msfs_error = 0;
+extern int msfs_error;
 
 /**
  * Header:
- * [f][s][number (2 bytes)]
+ * [ one signature block: HEADER_TEXT,(addr_t)VERSION, (addr_t)BLOCK_SIZE ]
  * [first list of free blocks]
  * [dir entry /]
  * data
@@ -64,10 +69,11 @@ struct fbl_pos_t {
 	short bit_pos;
 };
 
-void init(const char * option);
+//Set verify to 0 to not verify signature block (for ex formating)
+int init(const char * option, int verify);
 void cleanup();
 
-void reset_error() { msfs_error = 0; }
+void reset_error();
 
 void read_block(addr_t address, char* data);
 void write_block(addr_t address, const char* data);
@@ -81,6 +87,8 @@ fbl_pos_t mark_block(const addr_t addr, char bit);
 
 file_entry_t * find_entry(const char * path);
 file_entry_t * clone_entry(const file_entry_t * entry);
+
+inode_t inode_from_path(const char * path);
 
 inode_t read_inode(addr_t addr);
 void write_inode(inode_t * inode);
@@ -106,5 +114,6 @@ void delete_block(addr_t addr);
 //Called on new systems to create initial structure
 void format();
 
+void print_fbl();
 
 #endif
