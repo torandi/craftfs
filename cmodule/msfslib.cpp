@@ -390,6 +390,8 @@ static addr_t get_block_addr_from_inode(inode_t * inode, unsigned int block_inde
 
 	inode_t * block_node = inode;
 
+	addr_t prev_last = DATA_START;
+
 	if(inode_index > 0) {
 		std::vector<addr_t> * cache = get_inode_index_cache(inode);
 		if(inode_index < cache->size()) {
@@ -400,7 +402,7 @@ static addr_t get_block_addr_from_inode(inode_t * inode, unsigned int block_inde
 			block_node = (inode_t*) tmp_block;
 			
 			for(unsigned int i = cache->size() - 1; i < inode_index; ++i) {
-
+				prev_last = block_node->block_addr[INODE_BLOCKS - 1];
 				if(block_node->next_block == 0) {
 					//Must add a block to this inode
 					inode_t new_inode = create_blank_inode(inode->attributes.st_mode);
@@ -422,7 +424,7 @@ static addr_t get_block_addr_from_inode(inode_t * inode, unsigned int block_inde
 	
 	if(addr == 0) {
 		//Must allocate this block!
-		addr_t prev = (relative_block_index > 0) ? block_node->block_addr[relative_block_index - 1] : DATA_START;
+		addr_t prev = (relative_block_index > 0) ? block_node->block_addr[relative_block_index - 1] : prev_last;
 		addr = block_node->block_addr[relative_block_index] = allocate_block_cont(prev);
 		++(inode->attributes.st_blocks);
 		++(block_node->attributes.st_blocks);
@@ -727,15 +729,8 @@ int read_inode_data(inode_t * inode, size_t offset, size_t size, char * data) {
 }
 
 int write_inode_data(inode_t * inode, size_t offset, size_t size, const char * data) {
-	timer::timer_t t[10];
-	float wt = 0.0;
-	float gt = 0.0;
-	timer::start(t[0]);
-
-	timer::start(t[1]);
 	inode_addr_t start_addr = find_addr_in_inode(inode, offset);
 	inode_addr_t end_addr = find_addr_in_inode(inode, offset + size);
-	timer::stop(t[1]);
 	
 	size_t data_offset = std::min( size , (size_t) ( BLOCK_SIZE - start_addr.addr_in_block)); //Also size of first block for now
 /*
@@ -746,33 +741,19 @@ int write_inode_data(inode_t * inode, size_t offset, size_t size, const char * d
 			end_addr.block_index, end_addr.block_addr, end_addr.addr_in_block);
 */
 
-	timer::start(t[2]);
 	write_data(start_addr.block_addr, data, start_addr.addr_in_block, data_offset );
-	timer::stop(t[2]);
-	wt = timer::get(t[2]);
 
-	timer::start(t[3]);
 	for(unsigned int block_index = start_addr.block_index + 1; block_index < end_addr.block_index; ++block_index) { //Iterate the intermediate blocks
-		timer::start(t[4]);
 		addr_t block_addr = get_block_addr_from_inode(inode, block_index);
-		timer::stop(t[4]);
-		gt += timer::get(t[4]);
 		if(msfs_error != 0) return 0;
 
-		timer::start(t[2]);
 		write_block(block_addr, data + data_offset);
-		timer::stop(t[2]);
-		wt = +timer::get(t[2]);
 
 		data_offset += BLOCK_SIZE;
 	}
-	timer::stop(t[3]);
 
 	if(end_addr.block_index != start_addr.block_index) { 
-		timer::start(t[2]);
 		write_data(end_addr.block_addr, data + data_offset, 0, end_addr.addr_in_block);
-		timer::stop(t[2]);
-		wt = +timer::get(t[2]);
 	}
 
 	if((size_t) (offset + size) > inode->attributes.st_size) {
@@ -780,25 +761,8 @@ int write_inode_data(inode_t * inode, size_t offset, size_t size, const char * d
 	}
 	inode->attributes.st_atime = time(NULL);
 	inode->attributes.st_mtime = time(NULL);
-	timer::start(t[5]);
 	write_inode(inode);
-	timer::stop(t[5]);
-
-	timer::stop(t[0]);
 	
-	printf(	"Timing results: \n "\
-				"write_inode_data: %f\n" \
-				"\t find_addr_in_inode: %f\n" \
-				"\t write_{data,block}: %f\n" \
-				"\t for-loop: %f\n" \
-				"\t get_block_addr_from_inode: %f\n" \
-				"\t write_inode: %f\n",
-				timer::get(t[0]),
-				timer::get(t[1]),
-				wt,
-				timer::get(t[3]),
-				gt,
-				timer::get(t[5]));
 	return size;
 }
 
