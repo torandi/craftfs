@@ -497,24 +497,27 @@ void delete_file_entry(file_entry_t * file_entry) {
 	//Remove from directory listing:
 	
 	char * data = (char*) malloc(directory.attributes.st_size);
-	addr_t next = 0;
+	addr_t next_read = 0;
+	addr_t next_write = 0;
 
 	file_entry_t * entry;
 
 	while( 1 ) {
-		read_inode_data(&directory, next, (sizeof(addr_t) * 2), data + next);
-		entry = (file_entry_t*) (data + next);
-		next += sizeof(addr_t) * 2;
+		read_inode_data(&directory, next_read, (sizeof(addr_t) * 2), data + next_write);
+		entry = (file_entry_t*) (data + next_write);
+		next_write += sizeof(addr_t) * 2;
+		next_read += sizeof(addr_t) * 2;
 		if(entry->len == 0) break;
 
-		read_inode_data(&directory, next, entry->len, data + next);
-		if(strncmp(data + next, file_entry->name, strlen(file_entry->name)) == 0) {
-			next -= sizeof(addr_t) * 2; //don't include this
+		read_inode_data(&directory, next_read, entry->len, data + next_write);
+		next_read += entry->len;
+		if(strncmp(data + next_write, file_entry->name, strlen(file_entry->name)) == 0) {
+			next_write -= sizeof(addr_t) * 2; //don't include this
 		} else {
-			next += entry->len;
+			next_write += entry->len;
 		}
 	}
-	directory.attributes.st_size = next;
+	directory.attributes.st_size = next_write;
 	write_inode_data(&directory, 0, directory.attributes.st_size, data);
 	write_inode(&directory);
 	--file.attributes.st_nlink;
@@ -590,7 +593,7 @@ static inode_t create_blank_inode(mode_t mode) {
 	return inode;
 }
 
-inode_t create_inode_from_path(const char * in_path, mode_t mode, fuse_file_info *fi) {
+inode_t create_inode_from_path(const char * in_path, mode_t mode) {
 	char * path = copy_and_trim_path(in_path);
 	char * last_slash = strrchr(path, '/');
 	inode_t inode,  dir;
@@ -610,7 +613,7 @@ inode_t create_inode_from_path(const char * in_path, mode_t mode, fuse_file_info
 	else
 		dir = inode_from_path("/");
 
-	if(!check_access(&dir, fi)) {
+	if(!check_access(&dir, O_CREAT)) {
 		msfs_error = -EPERM;
 		return inode;
 	}
@@ -667,6 +670,7 @@ inode_t create_inode(inode_t * in_dir, const char* name, mode_t mode) {
 }
 
 static void delete_inode(inode_t * inode) {
+	uncache_inode(inode); //nuke cache
 	for(unsigned int i=0; i<INODE_BLOCKS; ++i) {
 		if(inode->block_addr[i] != 0) {
 			delete_block(inode->block_addr[i]);
@@ -733,13 +737,6 @@ int write_inode_data(inode_t * inode, size_t offset, size_t size, const char * d
 	inode_addr_t end_addr = find_addr_in_inode(inode, offset + size);
 	
 	size_t data_offset = std::min( size , (size_t) ( BLOCK_SIZE - start_addr.addr_in_block)); //Also size of first block for now
-/*
-	printf("Start addr: {block index: %d, block_addr: %u, addr in block: %d }\n", 
-			start_addr.block_index, start_addr.block_addr, start_addr.addr_in_block);
-
-	printf("End addr: {block index: %d, block_addr: %d, addr in block: %d }\n", 
-			end_addr.block_index, end_addr.block_addr, end_addr.addr_in_block);
-*/
 
 	write_data(start_addr.block_addr, data, start_addr.addr_in_block, data_offset );
 
@@ -871,7 +868,7 @@ addr_t next_free_block(const addr_t prev, fbl_pos_t * fbl_pos) {
 	};
 }
 
-int check_access(const inode_t * inode, fuse_file_info *fi) {
+int check_access(const inode_t * inode, int flags) {
 	//TODO
 	return 1;
 }

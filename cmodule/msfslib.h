@@ -94,7 +94,7 @@ inode_t inode_from_path(const char * path);
 inode_t read_inode(addr_t addr);
 void write_inode(inode_t * inode);
 inode_t create_inode(inode_t * in_dir, const char* name, mode_t mode);
-inode_t create_inode_from_path(const char * in_path, mode_t mode, fuse_file_info *fi);
+inode_t create_inode_from_path(const char * in_path, mode_t mode);
 
 void delete_file_entry(file_entry_t * file); //This also frees the file_entry
 void add_file_entry(file_entry_t * file, inode_t * dir);
@@ -107,7 +107,7 @@ int is_directory(const inode_t * inode);
 file_entry_t * next_file_entry(inode_t * inode, addr_t * addr);
 void free_file_entry(file_entry_t * entry);
 
-int check_access(const inode_t * inode, fuse_file_info *fi);
+int check_access(const inode_t * inode, int flags);
 
 //Bumps atime and writes inode
 void bump_atime(inode_t * inode);

@@ -17,6 +17,8 @@ int main(int argc, char ** argv) {
 		op.open   = msfs_open;
 		op.read   = msfs_read;
 		op.write   = msfs_write;
+		op.mkdir = msfs_mkdir;
+		op.unlink = msfs_unlink;
 		op.destroy = msfs_destroy;
 
 	return fuse_main(argc, argv, &op, NULL);
