@@ -1,6 +1,7 @@
 #include "msfslib.h"
 #include <stdio.h>
 #include <errno.h>
+#include <cstring>
 #include "timer.h"
 
 static int msfs_getattr(const char *path, struct stat *stbuf) {
@@ -99,16 +100,41 @@ static int msfs_write(const char *path, const char *data, size_t size, off_t off
 	return bytes;
 }
 
-static int msfs_unlink (const char * path) {
-	reset_error();
-	file_entry_t * entry = find_entry(path);
+static int msfs_rm (file_entry_t * entry, int recursive) {
 	if(entry == NULL) return -ENOENT;
 	if(msfs_error != 0) return msfs_error;
+
+	inode_t inode = read_inode(entry->address);
+
+	addr_t cur_addr = 0;
+	int ret;
+
+	if(recursive && is_directory(&inode)) {
+		file_entry_t * file_entry;
+		for(file_entry = next_file_entry(&inode, &cur_addr); file_entry != NULL; file_entry = next_file_entry(&inode, &cur_addr)) {
+			if(strcmp(file_entry->name, ".") != 0 && strcmp(file_entry->name, "..") != 0) {
+				ret = msfs_rm(file_entry, 1);
+				if(ret != 0) return ret;
+			}
+		}
+	}
+
 	delete_file_entry(entry);
 	free_file_entry(entry);
 	return msfs_error;
 }
 
+static int msfs_unlink ( const char * path) {
+	reset_error();
+	file_entry_t * entry = find_entry(path);
+	return msfs_rm(entry, 0);
+}
+
+static int msfs_rmdir ( const char * path) {
+	reset_error();
+	file_entry_t * entry = find_entry(path);
+	return msfs_rm(entry, 1);
+}
 
 static void msfs_destroy(void * ptr) {
 	reset_error();

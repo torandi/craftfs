@@ -471,7 +471,7 @@ void delete_file_entry(file_entry_t * file_entry) {
 		return;
 	}
 
-	if(is_directory(&file) && file_count_abort(&file, 1) > 0) {
+	if(is_directory(&file) && file_count_abort(&file, 3) > 2) { // ignore . and ..
 		msfs_error = -ENOTEMPTY;
 		return;
 	}
