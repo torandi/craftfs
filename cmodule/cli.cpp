@@ -1,6 +1,7 @@
 #include "msfslib.h"
 
 #include <cstring>
+#include <cstdlib>
 #include <cstdio>
 
 int main(int argc, const char ** argv) {
@@ -29,6 +30,20 @@ int main(int argc, const char ** argv) {
 					printf("File found, address: %x\n", e->address);
 					free_file_entry(e);
 				}
+			} else if(strcmp(argv[1], "i") == 0) { //inspect node
+				if(argc < 3) {
+					printf("Missing argument: inode number\n");
+					return -1;
+				}
+				inode_t inode = read_inode(atoi(argv[2]));
+				printf("Inode %lu: size: %lu bytes, %lu blocks\n", inode.attributes.st_ino, inode.attributes.st_size, inode.attributes.st_blocks);
+				printf("Next inode: %u\n", inode.next_block);
+				printf("Blocks: \n");
+				for(unsigned int i=0; i<INODE_BLOCKS; ++i) {
+					printf("%u ", inode.block_addr[i]);
+					if(i % 10 == 0) printf("\n");
+				}
+				printf("\n");
 			}
 		} else {
 			print_fbl();

@@ -1,6 +1,7 @@
 #include "msfslib.h"
 #include <stdio.h>
 #include <errno.h>
+#include "timer.h"
 
 static int msfs_getattr(const char *path, struct stat *stbuf) {
 	reset_error();
