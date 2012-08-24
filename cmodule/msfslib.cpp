@@ -340,13 +340,13 @@ file_entry_t * next_file_entry(inode_t * inode, addr_t * addr) {
 		free(entry);
 		return NULL;
 	} else {
-		//printf("Entry: { len: %d, address: %d }\n", entry->len, entry->address);
 		entry->name = (char*) malloc(entry->len);
 		*addr += sizeof(addr_t) *2;
 		read_inode_data(inode, *addr, entry->len , entry->name);
 		*addr += entry->len;
 		entry->parent_inode = inode->attributes.st_ino;
 		entry->path = NULL;
+		printf("Entry: { len: %d, address: %d, name: %s }\n", entry->len, entry->address, entry->name);
 		return entry;
 	}
 }
@@ -364,14 +364,18 @@ file_entry_t * find_entry_internal_path(const char ** path, addr_t node_addr) {
 		return NULL;
 	}
 
+	printf("Find entry (internal path): %s\n", path[0]);
+
 	file_entry_t * entry = find_entry_in_dir(path[0], &inode);
 	if(entry == NULL) {
 		msfs_error = -ENOENT;
 		return NULL;
 	} else if(path[1] == NULL) {
+		printf("Entry found\n");
 		//This was the last part of the path, return it:
 		return entry;
 	} else {
+		printf("Recurse! \n");
 		//We need to go deeper!
 		file_entry_t * next = find_entry_internal_path(path + 1, entry->address);
 		free_file_entry(entry);
@@ -965,10 +969,17 @@ void print_fbl() {
 	addr_t addr = 0;
 	fbl_pos_t pos;
 	
+	unsigned long long in_use = 0;
+
 	calc_fbl_pos(addr, &pos);
 	for(;pos.index < num_fbls; calc_fbl_pos(++addr, &pos)) {
 		++l;
-		if(l % 256 == 0) printf("\n");
-		printf("%d", read_bit(get_fbl(pos.index)[ADDR_SIZE + pos.char_index], pos.bit_pos));
+		short bit = read_bit(get_fbl(pos.index)[ADDR_SIZE + pos.char_index], pos.bit_pos);
+		in_use += bit;
+		if(pos.index < 10) {
+			printf("%d", bit);
+			if(l % 256 == 0) printf("\n");
+		}
 	}
+	printf("\n\n%llu blocks in use\n", in_use);
 }
