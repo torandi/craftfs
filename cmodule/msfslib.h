@@ -93,6 +93,7 @@ inode_t inode_from_path(const char * path);
 inode_t read_inode(addr_t addr);
 void write_inode(inode_t * inode);
 inode_t create_inode(inode_t * in_dir, const char* name, mode_t mode);
+inode_t create_inode_from_path(const char * in_path, mode_t mode);
 
 void delete_file_entry(file_entry_t * file); //This also frees the file_entry
 void add_file_entry(file_entry_t * file, inode_t * dir);

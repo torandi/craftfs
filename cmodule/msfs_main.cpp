@@ -12,6 +12,8 @@ int main(int argc, char ** argv) {
 		op.getattr  = msfs_getattr;
 		op.opendir = msfs_opendir;
 		op.readdir = msfs_readdir;
+		op.ftruncate = msfs_ftruncate;
+		op.create = msfs_create;
 		op.open   = msfs_open;
 		op.read   = msfs_read;
 		op.destroy = msfs_destroy;

@@ -59,6 +59,8 @@ static addr_t get_block_addr_from_inode(inode_t * inode, unsigned int block_inde
 //Addr is relative start of data in inode
 static inode_addr_t find_addr_in_inode(inode_t * inode, size_t addr);
 
+//Copies path (must be free'd). removes trailing slash
+static char * copy_and_trim_path(const char * path);
 
 static char * zeroes; //BLOCK_SIZE of zeros
 static char * block; //Always block_size big. Used for sending data that is less than BLOCK_SIZE
@@ -232,24 +234,28 @@ inode_t inode_from_path(const char * path) {
 }
 
 file_entry_t * find_entry(const char * in_path) {
-	std::map<std::string, file_entry_t*>::iterator it = files.find(std::string(in_path));
-	if(it != files.end()) return clone_entry(it->second);
-
 	assert(in_path[0] == '/');
 
-	char path[strlen(in_path)-1];
-	strcpy(path, in_path+1);
+	char * path = copy_and_trim_path(in_path);
+	printf("find_entry(\"%s\")\n", path);
 
-	char ** parts = split_path(path);
+	std::map<std::string, file_entry_t*>::iterator it = files.find(std::string(path));
+	if(it != files.end()) return clone_entry(it->second);
+
+	char ** parts = split_path(path + 1);
 
 	file_entry_t * entry= find_entry_internal_path((const char**) parts, ROOT_NODE);
 
 	free(parts);
 
 	if(entry != NULL) {
-		strcpy(entry->path, in_path);
-		files[std::string(in_path)] = clone_entry(entry);
+		entry->path = (char*) malloc(strlen(path) +1 );
+		strcpy(entry->path, path);
+		files[std::string(path)] = clone_entry(entry);
 	}
+
+	free(path);
+
 	return entry;
 }
 
@@ -462,6 +468,7 @@ void delete_file_entry(file_entry_t * file_entry) {
 
 void add_file_entry(file_entry_t * file, inode_t * dir) {
 	size_t cur_size = dir->attributes.st_size;
+	printf("Adding file entry for file %s in dir %lu (cur size: %lu)\n", file->name, dir->attributes.st_ino, cur_size);
 	if(!is_directory(dir)) {
 		msfs_error = -ENOTDIR;
 		return;
@@ -470,15 +477,22 @@ void add_file_entry(file_entry_t * file, inode_t * dir) {
 	if(cur_size > 0) cur_size -= sizeof(addr_t) * 2; //Remove last entry (terminating null entry)
 
 	write_inode_data(dir, cur_size, sizeof(addr_t)*2, (char*)file);
+
+	file_entry_t test;
+	read_inode_data(dir, cur_size, sizeof(addr_t) * 2, (char*) &test);
+	if(test.len != file->len) {
+		printf("Error: read data: %u, %u\n", test.len, test.address);
+		abort();
+	}
+
 	cur_size += sizeof(addr_t) * 2;
 	write_inode_data(dir, cur_size, file->len , file->name);
 	cur_size += file->len;
 
 	//Add terminating null entry
 	write_inode_data(dir, cur_size, sizeof(addr_t)*2, zeroes);
-	cur_size += sizeof(addr_t) * 2;
+	//cur_size += sizeof(addr_t) * 2;
 
-	dir->attributes.st_size = cur_size;
 	dir->attributes.st_mtime = time(NULL);
 
 
@@ -491,6 +505,7 @@ void add_file_entry(file_entry_t * file, inode_t * dir) {
 
 static inode_t create_blank_inode(mode_t mode) {
 	inode_t inode;
+	memset(&inode.attributes, 0, sizeof(inode.attributes));
 	inode.attributes.st_ino = allocate_block();
 	inode.next_block = 0;
 	inode.attributes.st_blocks = 1;
@@ -511,8 +526,41 @@ static inode_t create_blank_inode(mode_t mode) {
 	return inode;
 }
 
+inode_t create_inode_from_path(const char * in_path, mode_t mode) {
+	char * path = copy_and_trim_path(in_path);
+	char * last_slash = strrchr(path, '/');
+	inode_t inode,  dir;
+	if(last_slash == NULL) {
+		msfs_error = -ENOENT;
+		return inode;
+	}
+	*last_slash = '\0'; //Set this char to null to terminate this path
+	++last_slash; //Increase to point to filename
+	printf("Create: %s, %s\n", path, last_slash);
+	if(strlen(last_slash) <= 0) {
+		printf("Filename is %lu long (in: %s, path: %s)\n", strlen(last_slash), in_path, path);
+		msfs_error = -ENOENT;
+		return inode;
+	}
+
+	if(strlen(path) > 0) 
+		dir = inode_from_path(path);
+	else
+		dir = inode_from_path("/");
+
+	if(msfs_error != 0) { 
+		free(path);
+		return inode;
+	}
+
+	inode =  create_inode(&dir, last_slash, mode);
+	free(path);
+	return inode;
+}
+
 inode_t create_inode(inode_t * in_dir, const char* name, mode_t mode) {
 	inode_t inode;
+	printf("CREATE INODE: dir: %lu, name: %s, mode: %d\n", in_dir->attributes.st_ino, name, mode);
 	if(!is_directory(in_dir)) {
 		msfs_error = -ENOTDIR;
 		return inode;
@@ -526,6 +574,7 @@ inode_t create_inode(inode_t * in_dir, const char* name, mode_t mode) {
 	}
 
 	inode = create_blank_inode(mode);
+	printf("Inode created: %lu\n", inode.attributes.st_ino);
 
 	if(is_directory(&inode)) {
 		//Create self link
@@ -541,6 +590,7 @@ inode_t create_inode(inode_t * in_dir, const char* name, mode_t mode) {
 		link_entry.name = (char*)"..";
 		add_file_entry(&link_entry, &inode);
 	}
+
 	file_entry_t file_entry;
 	file_entry.address = inode.attributes.st_ino;
 	file_entry.len = strlen(name) + 1;
@@ -578,11 +628,11 @@ int read_inode_data(inode_t * inode, size_t offset, size_t size, char * data) {
 	inode_addr_t start_addr = find_addr_in_inode(inode, offset);
 	inode_addr_t end_addr = find_addr_in_inode(inode, offset + size);
 
-	printf("Start addr: {block index: %d, block_addr: 0x%x, addr in block: %d }\n", 
+	/*printf("Start addr: {block index: %d, block_addr: 0x%x, addr in block: %d }\n", 
 			start_addr.block_index, start_addr.block_addr, start_addr.addr_in_block);
 
 	printf("End addr: {block index: %d, block_addr: 0x%x, addr in block: %d }\n", 
-			end_addr.block_index, end_addr.block_addr, end_addr.addr_in_block);
+			end_addr.block_index, end_addr.block_addr, end_addr.addr_in_block);*/
 	
 	size_t data_offset = std::min( size , (size_t)( BLOCK_SIZE - start_addr.addr_in_block)); //Also size of first block for now
 
@@ -603,7 +653,7 @@ int read_inode_data(inode_t * inode, size_t offset, size_t size, char * data) {
 		data_offset += BLOCK_SIZE;
 	}
 
-	if(end_addr.addr_in_block != 0) { //If 0 the last block is not needed
+	if(end_addr.block_index != start_addr.block_index && end_addr.addr_in_block != 0) { //If 0 the last block is not needed
 		//read whole block to intermediate cache
 		read_block(end_addr.block_addr, block);
 		//And then memcpy
@@ -621,6 +671,12 @@ int write_inode_data(inode_t * inode, size_t offset, size_t size, const char * d
 	
 	size_t data_offset = std::min( size , (size_t) ( BLOCK_SIZE - start_addr.addr_in_block)); //Also size of first block for now
 
+	/*printf("Start addr: {block index: %d, block_addr: 0x%x, addr in block: %d }\n", 
+			start_addr.block_index, start_addr.block_addr, start_addr.addr_in_block);
+
+	printf("End addr: {block index: %d, block_addr: 0x%x, addr in block: %d }\n", 
+			end_addr.block_index, end_addr.block_addr, end_addr.addr_in_block);*/
+
 	write_data(start_addr.block_addr, data, start_addr.addr_in_block, data_offset );
 
 	for(unsigned int block_index = start_addr.block_index + 1; block_index < end_addr.block_index; ++block_index) { //Iterate the intermediate blocks
@@ -630,7 +686,9 @@ int write_inode_data(inode_t * inode, size_t offset, size_t size, const char * d
 		data_offset += BLOCK_SIZE;
 	}
 
-	write_data(end_addr.block_addr, data + data_offset, 0, end_addr.addr_in_block);
+	if(end_addr.block_index != start_addr.block_index) { 
+		write_data(end_addr.block_addr, data + data_offset, 0, end_addr.addr_in_block);
+	}
 
 	if((size_t) (offset + size) > inode->attributes.st_size) {
 		inode->attributes.st_size = offset + size;
@@ -728,6 +786,15 @@ addr_t next_free_block(const addr_t prev, fbl_pos_t * fbl_pos) {
 	//Fell through, fbl_pos should now contain next block
 	
 	return cur;
+}
+
+static char * copy_and_trim_path(const char * path) {
+	char * new_path = (char*) malloc(strlen(path) + 1);
+	strcpy(new_path, path);
+	if(strlen(new_path) > 1 && new_path[strlen(new_path) - 1] == '/') {
+		new_path[strlen(new_path) - 1] = '\0';
+	}
+	return new_path;
 }
 
 unsigned int file_count(inode_t *inode) {
