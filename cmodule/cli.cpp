@@ -29,9 +29,23 @@ int main(int argc, const char ** argv) {
 					return msfs_error;
 				} else {
 					printf("File found, address: %x\n", e->address);
+
+					inode_t dir_inode = read_inode(e->address);
 					free_file_entry(e);
+
+					addr_t addr = 0;
+					file_entry_t * entry;
+
+					entry = next_file_entry(&dir_inode, &addr);
+
+					while(entry != NULL) {
+						//printf("%s at address %u\n", entry->name, entry->address);
+
+						free_file_entry(entry);
+						entry = next_file_entry(&dir_inode, &addr);
+					}
 				}
-			} else if(strcmp(argv[1], "i") == 0) { //inspect block
+			} else if(strcmp(argv[1], "block") == 0) { //inspect block
 				if(argc < 3) {
 					printf("Missing argument: block\n");
 					return -1;
@@ -45,7 +59,7 @@ int main(int argc, const char ** argv) {
 					if((i + 1) % 32 == 0) printf("\n");
 				}
 				printf("\n");
-			} else if(strcmp(argv[1], "ii") == 0) { //inspect inode
+			} else if(strcmp(argv[1], "inode") == 0) { //inspect inode
 				if(argc < 3) {
 					printf("Missing argument: inode number\n");
 					return -1;
@@ -59,9 +73,18 @@ int main(int argc, const char ** argv) {
 					if( ( i + 1) % 10 == 0) printf("\n");
 				}
 				printf("\n");
+			} else if(strcmp(argv[1], "fbl") == 0) { //show fbl
+				print_fbl();
+			} else {
+				printf("Unknown command %s\n", argv[1]);
 			}
 		} else {
-			print_fbl();
+			printf("msfs cli. Usage:\n"
+					"format - format the file system\n"
+					"ls [file]\n"
+					"block [num]: Inspect block\n"
+					"inode [num]: Inspect inode\n"
+					"fbl: Show free block list\n");
 		}
 	}
 

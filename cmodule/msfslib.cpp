@@ -34,14 +34,18 @@ struct inode_cache_entry_t {
 #define CACHE_SIZE 10
 #define INODE_INDEX_CACHE_SIZE 5
 
+#define DISABLE_FILE_ENTRY_CACHE 0
+
 cache_entry block_cache[CACHE_SIZE];
 inode_cache_entry_t inode_index_cache[INODE_INDEX_CACHE_SIZE];
 
 static int next_cache_entry_fill = 0;
 static int next_inode_cache_entry_fill = 0;
 
+/* Lookup list for fbl index to the address of that fbl */
 static addr_t * fbl_addr;
-static int num_fbls, num_alloc_fbls; //Actual number, allocated in local list, num_alloc >= num_fbls
+/* Actual number & allocated in local list, num_alloc >= num_fbls */
+static int num_fbls, num_alloc_fbls;
 
 static char** split_path(char * path);
 
@@ -82,10 +86,10 @@ static cache_entry * find_or_create_cache_entry(addr_t address) {
 			return block_cache + i;
 		}
 	}
-	cache_entry * entry = &(block_cache[next_cache_entry_fill++]);
+	cache_entry * entry = &(block_cache[next_cache_entry_fill]);
 	entry->addr = address;
 	entry->valid = 0;
-	next_cache_entry_fill = next_cache_entry_fill % 10;
+	next_cache_entry_fill = ( next_cache_entry_fill + 1 ) % 10;
 
 	return entry;
 }
@@ -102,12 +106,12 @@ static std::vector<addr_t> * get_inode_index_cache(const inode_t * inode) {
 			return &(entry->blocks);
 		}
 	}
-	inode_cache_entry_t * entry = &(inode_index_cache[next_inode_cache_entry_fill++]);
+	inode_cache_entry_t * entry = &(inode_index_cache[next_inode_cache_entry_fill]);
 	entry->addr = (addr_t) inode->attributes.st_ino;
 	entry->valid = 1;
 	entry->blocks = std::vector<addr_t>();
 	entry->blocks.push_back((addr_t)inode->attributes.st_ino);
-	next_inode_cache_entry_fill = next_cache_entry_fill % 10;
+	next_inode_cache_entry_fill = ( next_cache_entry_fill + 1 ) % 10;
 
 	return &(entry->blocks);
 }
@@ -191,6 +195,7 @@ void cleanup() {
 	free(fbl_addr);
 }
 
+/* Read single block (cached) */
 void read_block(addr_t address, char * data) {
 	cache_entry * cache = find_or_create_cache_entry(address);
 
@@ -203,6 +208,7 @@ void read_block(addr_t address, char * data) {
 	cache->valid = 1;
 }
 
+/* Write single block */
 void write_block(addr_t address, const char * data) {
 	if(msfs_error != 0) {
 		printf("Not writing block, msfs_error is %d\n", msfs_error);
@@ -216,6 +222,10 @@ void write_block(addr_t address, const char * data) {
 	}
 }
 
+/*
+ * Writes from offset to the end of the block that address resides in
+ * Note that offset + size must be less or equal to BLOCK_SIZE
+ */
 void write_data(addr_t address, const char* data, size_t offset, size_t size) {
 	assert( (offset + size) <= BLOCK_SIZE);
 	if(size == BLOCK_SIZE) {
@@ -227,10 +237,12 @@ void write_data(addr_t address, const char* data, size_t offset, size_t size) {
 	}
 }
 
+/* Find and allocate a free block (starting from the begining) */
 addr_t allocate_block() {
 	return allocate_block_cont(DATA_START);
 }
 
+/* Find and allocate a free block, starting from a previous position */
 addr_t allocate_block_cont(addr_t prev) {
 	fbl_pos_t fbl_pos;
 	addr_t addr = next_free_block(prev, &fbl_pos);
@@ -275,7 +287,7 @@ static char** split_path(char * path) {
 inode_t inode_from_path(const char * path) {
 	inode_t inode;
 	file_entry_t * entry = find_entry(path);
-	if(entry == NULL) { 
+	if(entry == NULL) {
 		assert(msfs_error != 0);
 		return inode;
 	}
@@ -287,21 +299,27 @@ inode_t inode_from_path(const char * path) {
 file_entry_t * find_entry(const char * in_path) {
 	assert(in_path[0] == '/');
 
-	char * path = copy_and_trim_path(in_path);
+	printf("Find entry %s\n", in_path);
 
-	std::map<std::string, file_entry_t*>::iterator it = files.find(std::string(path));
-	if(it != files.end()) return clone_entry(it->second);
+	char * path = copy_and_trim_path(in_path);
+	std::string cache_path = std::string(path);
+
+	std::map<std::string, file_entry_t*>::iterator it = files.find(cache_path);
+	if(it != files.end()) {
+		printf("Cache hit! (%s: %u)\n", it->first.c_str(), it->second->address);
+		return clone_entry(it->second);
+	}
 
 	char ** parts = split_path(path + 1);
 
-	file_entry_t * entry= find_entry_internal_path((const char**) parts, ROOT_NODE);
+	file_entry_t * entry = find_entry_internal_path((const char**) parts, ROOT_NODE);
 
 	free(parts);
 
 	if(entry != NULL) {
-		entry->path = (char*) malloc(strlen(path) +1 );
-		strcpy(entry->path, path);
-		files[std::string(path)] = clone_entry(entry);
+		entry->path = strdup(cache_path.c_str());
+		printf("Writing result to cache (%s: %u)\n", cache_path.c_str(), entry->address);
+		files[cache_path] = clone_entry(entry);
 	}
 
 	free(path);
@@ -310,13 +328,19 @@ file_entry_t * find_entry(const char * in_path) {
 }
 
 static file_entry_t * find_entry_in_dir(const char * name, inode_t * inode) {
+	printf("Find entry in dir: %s in inode %lu\n", name, inode->attributes.st_ino);
 	addr_t cur_addr = 0;
-	file_entry_t * entry;
-	for(entry = next_file_entry(inode, &cur_addr); entry != NULL; entry = next_file_entry(inode, &cur_addr)) {
+	file_entry_t * entry = next_file_entry(inode, &cur_addr);
+	while(entry!=NULL) {
+		printf("Compare '%s' ?= '%s': ", name, entry->name);
 		if(strcmp(name, entry->name) == 0) {
+			printf("EQ\n");
 			return entry;
 		}
+		printf("NEQ\n");
 		free_file_entry(entry);
+
+		entry = next_file_entry(inode, &cur_addr);
 	}
 	return NULL;
 }
@@ -375,7 +399,7 @@ file_entry_t * find_entry_internal_path(const char ** path, addr_t node_addr) {
 		//This was the last part of the path, return it:
 		return entry;
 	} else {
-		printf("Recurse! \n");
+		printf("Traversing directory tree \n");
 		//We need to go deeper!
 		file_entry_t * next = find_entry_internal_path(path + 1, entry->address);
 		free_file_entry(entry);
@@ -404,7 +428,7 @@ static addr_t get_block_addr_from_inode(inode_t * inode, unsigned int block_inde
 		} else {
 			read_block(cache->back(), tmp_block);
 			block_node = (inode_t*) tmp_block;
-			
+
 			for(unsigned int i = cache->size() - 1; i < inode_index; ++i) {
 				prev_last = block_node->block_addr[INODE_BLOCKS - 1];
 				if(block_node->next_block == 0) {
@@ -425,7 +449,7 @@ static addr_t get_block_addr_from_inode(inode_t * inode, unsigned int block_inde
 
 
 	addr_t addr = block_node->block_addr[relative_block_index];
-	
+
 	if(addr == 0) {
 		//Must allocate this block!
 		addr_t prev = (relative_block_index > 0) ? block_node->block_addr[relative_block_index - 1] : prev_last;
@@ -451,7 +475,7 @@ static inode_addr_t find_addr_in_inode(inode_t * inode, size_t addr) {
 
 	ret.block_addr = get_block_addr_from_inode(inode, ret.block_index);
 	ret.addr_in_block = (addr % BLOCK_SIZE);
-	
+
 	return ret;
 }
 
@@ -469,7 +493,7 @@ void write_inode(inode_t * inode) {
 void delete_file_entry(file_entry_t * file_entry) {
 	inode_t directory = read_inode(file_entry->parent_inode);
 	inode_t file = read_inode(file_entry->address);
-	
+
 	if(!is_directory(&directory)) {
 		msfs_error = -ENOTDIR;
 		return;
@@ -499,7 +523,7 @@ void delete_file_entry(file_entry_t * file_entry) {
 	}
 
 	//Remove from directory listing:
-	
+
 	char * data = (char*) malloc(directory.attributes.st_size);
 	addr_t next_read = 0;
 	addr_t next_write = 0;
@@ -612,7 +636,7 @@ inode_t create_inode_from_path(const char * in_path, mode_t mode) {
 		return inode;
 	}
 
-	if(strlen(path) > 0) 
+	if(strlen(path) > 0)
 		dir = inode_from_path(path);
 	else
 		dir = inode_from_path("/");
@@ -622,7 +646,7 @@ inode_t create_inode_from_path(const char * in_path, mode_t mode) {
 		return inode;
 	}
 
-	if(msfs_error != 0) { 
+	if(msfs_error != 0) {
 		free(path);
 		return inode;
 	}
@@ -699,12 +723,12 @@ int read_inode_data(inode_t * inode, size_t offset, size_t size, char * data) {
 	inode_addr_t start_addr = find_addr_in_inode(inode, offset);
 	inode_addr_t end_addr = find_addr_in_inode(inode, offset + size);
 
-	/*printf("Start addr: {block index: %d, block_addr: 0x%x, addr in block: %d }\n", 
+	/*printf("Start addr: {block index: %d, block_addr: 0x%x, addr in block: %d }\n",
 			start_addr.block_index, start_addr.block_addr, start_addr.addr_in_block);
 
-	printf("End addr: {block index: %d, block_addr: 0x%x, addr in block: %d }\n", 
+	printf("End addr: {block index: %d, block_addr: 0x%x, addr in block: %d }\n",
 			end_addr.block_index, end_addr.block_addr, end_addr.addr_in_block);*/
-	
+
 	size_t data_offset = std::min( size , (size_t)( BLOCK_SIZE - start_addr.addr_in_block)); //Also size of first block for now
 
 	if(data_offset == BLOCK_SIZE) {
@@ -739,7 +763,7 @@ int read_inode_data(inode_t * inode, size_t offset, size_t size, char * data) {
 int write_inode_data(inode_t * inode, size_t offset, size_t size, const char * data) {
 	inode_addr_t start_addr = find_addr_in_inode(inode, offset);
 	inode_addr_t end_addr = find_addr_in_inode(inode, offset + size);
-	
+
 	size_t data_offset = std::min( size , (size_t) ( BLOCK_SIZE - start_addr.addr_in_block)); //Also size of first block for now
 
 	write_data(start_addr.block_addr, data, start_addr.addr_in_block, data_offset );
@@ -753,17 +777,17 @@ int write_inode_data(inode_t * inode, size_t offset, size_t size, const char * d
 		data_offset += BLOCK_SIZE;
 	}
 
-	if(end_addr.block_index != start_addr.block_index) { 
+	if(end_addr.block_index != start_addr.block_index) {
 		write_data(end_addr.block_addr, data + data_offset, 0, end_addr.addr_in_block);
 	}
 
-	if((size_t) (offset + size) > inode->attributes.st_size) {
+	if((ssize_t) (offset + size) > inode->attributes.st_size) {
 		inode->attributes.st_size = offset + size;
 	}
 	inode->attributes.st_atime = time(NULL);
 	inode->attributes.st_mtime = time(NULL);
 	write_inode(inode);
-	
+
 	return size;
 }
 
@@ -771,6 +795,10 @@ int is_directory(const inode_t * inode) {
 	return S_ISDIR(inode->attributes.st_mode);
 }
 
+
+/* Makes sure there is enought space in the fbl_addr list
+ * to access the given index
+ */
 static void check_fbl_size(int index) {
 	while(index >= num_alloc_fbls) {
 		num_alloc_fbls *= 2;
@@ -778,6 +806,9 @@ static void check_fbl_size(int index) {
 	}
 }
 
+/*
+ * fills fbl_addr with data from the file system
+ */
 static void fill_fbl_addr() {
 	char * fbl = get_fbl(0);
 	if(msfs_error != 0) return;
@@ -792,18 +823,22 @@ static void fill_fbl_addr() {
 		fbl = get_fbl(index++);
 		if(msfs_error != 0) return;
 		next_addr = (addr_t*) fbl;
-	} 
+	}
 }
 
+/*
+ * Fetches (or creates) the fbl with the given index
+ */
 static char* get_fbl(int index) {
 	if(index >= num_fbls) {
 		check_fbl_size(index);
 		fbl_addr[index] = FREE_BLOCK_LIST_BLOCKS * index;	// Address to the first block in this list
-																			// this block will always be free, since this list does not yet exist
-		//Write zeroes to the block:
+														// this block will always be free, since this list does not yet exist
+
+		// Write zeroes to the block:
 		write_block(fbl_addr[index], zeroes);
 		++num_fbls;
-		fbl_pos_t fbl_pos = { 
+		fbl_pos_t fbl_pos = {
 			/* index = */ index,
 			/* char_index =  */ 0,
 			/* bit_pos = */ 0
@@ -816,11 +851,14 @@ static char* get_fbl(int index) {
 	return block;
 }
 
+/*
+ * Read a bit from a char
+ */
 static inline char read_bit(char c, short pos) {
 	return (c >> pos) & 1;
 }
 
-void mark_block_from_pos(const fbl_pos_t * fbl_pos, char bit) {
+void mark_block_from_pos(const fbl_pos_t * fbl_pos, char bit_value) {
 	check_fbl_size(fbl_pos->index);
 	if(fbl_pos->index >= num_fbls) {
 		printf("index is larger than num fbls\n");
@@ -838,13 +876,16 @@ void mark_block_from_pos(const fbl_pos_t * fbl_pos, char bit) {
 
 	char * fbl = get_fbl(fbl_pos->index);
 	char * c = fbl + (ADDR_SIZE + fbl_pos->char_index);
-	if(read_bit(*c, fbl_pos->bit_pos) == bit) return;
+	if(read_bit(*c, fbl_pos->bit_pos) == bit_value) return;
 	//We know the bit shall be flipped, and can just xor it with 1
-	*c ^= 1 << fbl_pos->bit_pos; 
+	*c ^= 1 << fbl_pos->bit_pos;
 	//Write the block:
 	write_block(fbl_addr[fbl_pos->index], fbl);
 }
 
+/*
+ * Calculate the fbl position from a address
+ */
 static void calc_fbl_pos(const addr_t addr, fbl_pos_t * pos) {
 	pos->index = addr / FREE_BLOCK_LIST_BLOCKS;
 	addr_t internal_pos = addr % FREE_BLOCK_LIST_BLOCKS;
@@ -852,14 +893,18 @@ static void calc_fbl_pos(const addr_t addr, fbl_pos_t * pos) {
 	pos->bit_pos = internal_pos % 8;
 }
 
-fbl_pos_t mark_block(const addr_t addr, char bit) {
+fbl_pos_t mark_block(const addr_t addr, char bit_value) {
 	fbl_pos_t pos;
 	calc_fbl_pos(addr, &pos);
-	mark_block_from_pos(&pos, bit);
+	mark_block_from_pos(&pos, bit_value);
 
 	return pos;
 }
 
+/*
+ * Finds the next free block following the addr prev
+ * fbl_pos stores the last fbl pos to speedup following lookups
+ */
 addr_t next_free_block(const addr_t prev, fbl_pos_t * fbl_pos) {
 	addr_t cur = prev + 1;
 	calc_fbl_pos(cur, fbl_pos);
@@ -884,8 +929,7 @@ void bump_atime(inode_t * inode) {
 }
 
 static char * copy_and_trim_path(const char * path) {
-	char * new_path = (char*) malloc(strlen(path) + 1);
-	strcpy(new_path, path);
+	char * new_path = strdup(path);
 	if(strlen(new_path) > 1 && new_path[strlen(new_path) - 1] == '/') {
 		new_path[strlen(new_path) - 1] = '\0';
 	}
@@ -941,7 +985,7 @@ void format() {
 	inode.attributes.st_atime = time(NULL);
 	inode.attributes.st_mtime = time(NULL);
 	inode.attributes.st_ctime = time(NULL);
-	inode.attributes.st_nlink = 2;
+	inode.attributes.st_nlink = 0;
 	inode.attributes.st_size = 0;
 	inode.attributes.st_blksize = BLOCK_SIZE;
 	inode.attributes.st_mode = S_IFDIR | 755;
@@ -951,7 +995,7 @@ void format() {
 	}
 
 	write_inode(&inode);
-	
+
 	file_entry_t entry;
 	entry.len = 2;
 	entry.address = ROOT_NODE;
@@ -968,7 +1012,7 @@ void print_fbl() {
 	int l = 0;
 	addr_t addr = 0;
 	fbl_pos_t pos;
-	
+
 	unsigned long long in_use = 0;
 
 	calc_fbl_pos(addr, &pos);

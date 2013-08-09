@@ -19,11 +19,13 @@ static int msfs_opendir(const char * path, fuse_file_info * fi)  {
 	if(!is_directory(&inode)) return -ENOTDIR;
 	if(!check_access(&inode, fi->flags)) return -EPERM;
 	fi->fh = (uint64_t) inode.attributes.st_ino;
+	printf("msfs_opendir(%s) found inode %lu\n", path, inode.attributes.st_ino);
 	return 0;
 }
 
 static int msfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset, fuse_file_info *fi) {
 	reset_error();
+	printf("msfs_readdir(%s) inode %lu\n", path, fi->fh);
 	inode_t entry_inode, inode = read_inode((addr_t)fi->fh);
 	if(msfs_error != 0) return msfs_error;
 
@@ -33,10 +35,13 @@ static int msfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off
 	addr_t addr = 0;
 	file_entry_t * entry;
 
-	for(entry = next_file_entry(&inode, &addr); entry != NULL; entry = next_file_entry(&inode, &addr)) {
+	entry = next_file_entry(&inode, &addr);
+
+	while(entry != NULL) {
 		entry_inode = read_inode(entry->address);
 		filler(buf, entry->name, &entry_inode.attributes, 0);
 		free_file_entry(entry);
+		entry = next_file_entry(&inode, &addr);
 	}
 	return msfs_error;
 }

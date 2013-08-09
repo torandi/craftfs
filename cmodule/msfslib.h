@@ -36,18 +36,27 @@ extern int msfs_error;
  * [ one signature block: HEADER_TEXT,(addr_t)VERSION, (addr_t)BLOCK_SIZE ]
  * [first list of free blocks]
  * [dir entry /]
+ *
+ * ---
+ *
  * data
  */
 
 /**
- * Free block list:
- * [4 byte addr to next (or 0) ]
- * [ rest of it is bitmask for free blocks]
+ * Free block list (fbl):
+ * [address to next (or 0), ADDR_SIZE bytes ]
+ * [ rest of it is bitmask for free blocks ]
+ *
+ * A fbl is a bitmask of which blocks inside a FREE_BLOCK_LIST_BLOCKS sized region that
+ * are free.
  */
 
 #define FREE_BLOCK_LIST_SIZE ( BLOCK_SIZE - ADDR_SIZE )
 #define FREE_BLOCK_LIST_BLOCKS ( FREE_BLOCK_LIST_SIZE * 8 )
 
+/*
+ * Stored data only consist of len, address, name
+ */
 struct file_entry_t {
 	addr_t len;		//length of name, including terminating NULL, 0 == END
 	addr_t address;
@@ -60,10 +69,11 @@ struct file_entry_t {
 
 struct inode_t {
 	struct stat attributes;
-	addr_t block_addr[INODE_BLOCKS];
-	addr_t next_block;
+	addr_t block_addr[INODE_BLOCKS]; /* List of addresses to the blocks of this inode */
+	addr_t next_block; /* Address to the next block in this inode index */
 };
 
+/* Structure to store a position inside a fbl list */
 struct fbl_pos_t {
 	int index;
 	short char_index;
@@ -76,15 +86,23 @@ void cleanup();
 
 void reset_error();
 
+/* Read and write single blocks (cached) */
 void read_block(addr_t address, char* data);
 void write_block(addr_t address, const char* data);
 
-//Note that offset + size must be less or equal to BLOCK_SIZE
+/*
+ * Writes from offset to the end of the block that address resides in
+ * Note that offset + size must be less or equal to BLOCK_SIZE
+ */
 void write_data(addr_t address, const char* data, size_t offset, size_t size);
 
 addr_t next_free_block(const addr_t prev, fbl_pos_t * fbl_pos);
-void mark_block_from_pos(const fbl_pos_t * fbl_pos, char bit);
-fbl_pos_t mark_block(const addr_t addr, char bit);
+
+/* Set the value of a bit in a fbl from a fbl_pos */
+void mark_block_from_pos(const fbl_pos_t * fbl_pos, char bit_value);
+
+/* Set the value of a bit in a fbl from address. Returns the fbl_pos for the address*/
+fbl_pos_t mark_block(const addr_t addr, char bit_value);
 
 file_entry_t * find_entry(const char * path);
 file_entry_t * clone_entry(const file_entry_t * entry);
