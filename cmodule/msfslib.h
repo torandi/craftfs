@@ -117,6 +117,7 @@ inode_t create_inode_from_path(const char * in_path, mode_t mode);
 void delete_file_entry(file_entry_t * file); //This also frees the file_entry
 void add_file_entry(file_entry_t * file, inode_t * dir);
 
+/* returns number of read bytes */
 int read_inode_data(inode_t * inode, size_t offset, size_t size, char * data);
 int write_inode_data(inode_t * inode, size_t offset, size_t size, const char * data); //This one can change block count in inode
 

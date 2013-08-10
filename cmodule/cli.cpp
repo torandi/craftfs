@@ -5,6 +5,15 @@
 #include <cstdlib>
 #include <cstdio>
 
+static void print_data(char * tmp_block, size_t size) {
+	for(unsigned int i=0; i<size; ++i) {
+		printf("%02x:%c ", (unsigned char) tmp_block[i]  , isprint(tmp_block[i]) ? tmp_block[i] : '-');
+		if((i + 1) % 32 == 0) printf("\n");
+		if((i + 1) % BLOCK_SIZE == 0) printf("\n");
+	}
+	printf("\n");
+}
+
 int main(int argc, const char ** argv) {
 	if(argc > 1 && strcmp(argv[1], "format") == 0) {
 		int err = init("minecraft.dev", 0);
@@ -36,13 +45,15 @@ int main(int argc, const char ** argv) {
 					addr_t addr = 0;
 					file_entry_t * entry;
 
-					entry = next_file_entry(&dir_inode, &addr);
-
-					while(entry != NULL) {
-						//printf("%s at address %u\n", entry->name, entry->address);
-
-						free_file_entry(entry);
+					if(is_directory(&dir_inode)) {
 						entry = next_file_entry(&dir_inode, &addr);
+
+						while(entry != NULL) {
+							//printf("%s at address %u\n", entry->name, entry->address);
+
+							free_file_entry(entry);
+							entry = next_file_entry(&dir_inode, &addr);
+						}
 					}
 				}
 			} else if(strcmp(argv[1], "block") == 0) { //inspect block
@@ -54,11 +65,7 @@ int main(int argc, const char ** argv) {
 				read_block(atoi(argv[2]), tmp_block);
 				if(msfs_error!=0) return msfs_error;
 
-				for(unsigned int i=0; i<BLOCK_SIZE; ++i) {
-					printf("%02x:%c ", (unsigned char) tmp_block[i]  , isprint(tmp_block[i]) ? tmp_block[i] : '-');
-					if((i + 1) % 32 == 0) printf("\n");
-				}
-				printf("\n");
+				print_data(tmp_block, BLOCK_SIZE);
 			} else if(strcmp(argv[1], "inode") == 0) { //inspect inode
 				if(argc < 3) {
 					printf("Missing argument: inode number\n");
@@ -73,6 +80,11 @@ int main(int argc, const char ** argv) {
 					if( ( i + 1) % 10 == 0) printf("\n");
 				}
 				printf("\n");
+				printf("Data\n");
+				char * data = (char*)malloc(inode.attributes.st_size);
+				int bytes = read_inode_data(&inode, 0, inode.attributes.st_size, data);
+				print_data(data, bytes);
+				free(data);
 			} else if(strcmp(argv[1], "fbl") == 0) { //show fbl
 				print_fbl();
 			} else {

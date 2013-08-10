@@ -47,18 +47,22 @@ static addr_t * fbl_addr;
 /* Actual number & allocated in local list, num_alloc >= num_fbls */
 static int num_fbls, num_alloc_fbls;
 
-static char** split_path(char * path);
+static int split_path(char * path, char*** parts);
 
 static unsigned int file_count_abort(inode_t *inode, unsigned int abort_at);
 
-static file_entry_t * find_entry_internal_path(const char ** path, addr_t node);
+static file_entry_t * find_entry_internal_path(const char ** path, int index, addr_t node);
 static file_entry_t * find_entry_in_dir(const char * name, inode_t * inode);
+static file_entry_t * find_entry_in_cache(const char ** path, int num_parts);
 
 static void fill_fbl_addr();
 static char* get_fbl(int index);
 
 static inode_t create_blank_inode(mode_t mode);
 static void delete_inode(inode_t * inode);
+static char * join_path(const char **split_path, int num_parts);
+
+static void store_file_entry_in_cache(char * path, file_entry_t * entry);
 
 /*
  * An internal adress in an inode
@@ -79,6 +83,8 @@ static char * copy_and_trim_path(const char * path);
 
 static char * zeroes; //BLOCK_SIZE of zeros
 static char * block; //Always block_size big. Used for sending data that is less than BLOCK_SIZE
+
+static char * blank_string;
 
 static cache_entry * find_or_create_cache_entry(addr_t address) {
 	for(int i = 0; i< CACHE_SIZE; ++i) {
@@ -134,6 +140,7 @@ int init(const char * option, int verify) {
 
 	zeroes = (char*) calloc(BLOCK_SIZE, 1);
 	block = (char*) calloc(BLOCK_SIZE, 1);
+	blank_string = (char*) calloc(1, 1);
 
 	if(verify != 0) {
 		//Read signature block (and verify)
@@ -167,11 +174,13 @@ int init(const char * option, int verify) {
 
 	cache_entry empty;
 	empty.valid = 0;
+	empty.addr = 0;
 	for(int i = 0; i< CACHE_SIZE; ++i) {
 		block_cache[i] = empty;
 	}
 	inode_cache_entry_t i_empty;
 	i_empty.valid = 0;
+	i_empty.addr = 0;
 	for(int i = 0; i< INODE_INDEX_CACHE_SIZE; ++i) {
 		inode_index_cache[i] = i_empty;
 	}
@@ -190,8 +199,12 @@ int init(const char * option, int verify) {
 }
 
 void cleanup() {
+	for(std::map<std::string, file_entry_t*>::iterator it = files.begin(); it != files.end(); ++it) {
+		free_file_entry(it->second);
+	}
 	free(zeroes);
 	free(block);
+	free(blank_string);
 	free(fbl_addr);
 }
 
@@ -261,7 +274,7 @@ void delete_block(addr_t addr) {
 	mark_block(addr, 0);
 }
 
-static char** split_path(char * path) {
+static int split_path(char * path, char*** parts) {
 	int num_parts = 1;
 	char * found;
 	found = strchr(path, '/');
@@ -269,20 +282,38 @@ static char** split_path(char * path) {
 		++num_parts;
 		found = strchr(found + 1, '/');
 	}
-	++num_parts;
 
-
-	char ** parts = (char**) malloc(sizeof(char*) * num_parts);
+	*parts = (char**) malloc(sizeof(char*) * num_parts);
 	int index = 0;
 	found = strtok(path, "/");
 	while(found != NULL) {
-		parts[index++] = found;
+		(*parts)[index++] = found;
 		found = strtok(NULL, "/");
 	}
-	parts[num_parts - 1] = NULL;
+	for(int i=index; i<num_parts; ++i) {
+		(*parts)[i] = blank_string;
+	}
 
-	return parts;
+	return num_parts;
 }
+
+static char * join_path(const char ** split_path, int num_parts) {
+	char * path = (char*)malloc(2);
+	path[0] = '/';
+	path[1] = 0;
+
+	size_t curpos = 0;
+	for(int i=0; i<num_parts; ++i) {
+
+		path = (char*)realloc(path, strlen(path) + strlen(split_path[i]) + 2);
+		path[curpos] = '/';
+		memcpy(path + curpos + 1, split_path[i], strlen(split_path[i]) + 1 );
+
+		curpos = strlen(path);
+	}
+	return path;
+}
+
 
 inode_t inode_from_path(const char * path) {
 	inode_t inode;
@@ -302,25 +333,14 @@ file_entry_t * find_entry(const char * in_path) {
 	printf("Find entry %s\n", in_path);
 
 	char * path = copy_and_trim_path(in_path);
-	std::string cache_path = std::string(path);
 
-	std::map<std::string, file_entry_t*>::iterator it = files.find(cache_path);
-	if(it != files.end()) {
-		printf("Cache hit! (%s: %u)\n", it->first.c_str(), it->second->address);
-		return clone_entry(it->second);
-	}
+	char ** parts = NULL;
+	int num_parts = split_path(path + 1, &parts);
 
-	char ** parts = split_path(path + 1);
-
-	file_entry_t * entry = find_entry_internal_path((const char**) parts, ROOT_NODE);
+	//file_entry_t * entry = find_entry_internal_path((const char**) parts, 0, ROOT_NODE);
+	file_entry_t * entry = find_entry_in_cache((const char**) parts, num_parts);
 
 	free(parts);
-
-	if(entry != NULL) {
-		entry->path = strdup(cache_path.c_str());
-		printf("Writing result to cache (%s: %u)\n", cache_path.c_str(), entry->address);
-		files[cache_path] = clone_entry(entry);
-	}
 
 	free(path);
 
@@ -332,12 +352,9 @@ static file_entry_t * find_entry_in_dir(const char * name, inode_t * inode) {
 	addr_t cur_addr = 0;
 	file_entry_t * entry = next_file_entry(inode, &cur_addr);
 	while(entry!=NULL) {
-		printf("Compare '%s' ?= '%s': ", name, entry->name);
 		if(strcmp(name, entry->name) == 0) {
-			printf("EQ\n");
 			return entry;
 		}
-		printf("NEQ\n");
 		free_file_entry(entry);
 
 		entry = next_file_entry(inode, &cur_addr);
@@ -345,15 +362,23 @@ static file_entry_t * find_entry_in_dir(const char * name, inode_t * inode) {
 	return NULL;
 }
 
+static void store_file_entry_in_cache(char * path, file_entry_t * entry) {
+	entry->path = strdup(path);
+	//printf("Writing result to cache (%s: %u)\n", path, entry->address);
+	files[std::string(path)] = clone_entry(entry);
+}
+
 file_entry_t * clone_entry(const file_entry_t * old_entry) {
+	if(old_entry == NULL) return NULL;
+
 	file_entry_t * new_entry = (file_entry_t*) malloc(sizeof(file_entry_t));
+
 	memcpy(new_entry, old_entry, sizeof(file_entry_t));
-	new_entry->name = (char*) malloc(new_entry->len);
-	strcpy(new_entry->name, old_entry->name);
-	if(old_entry->path != NULL) {
-		new_entry->path = (char*) malloc(strlen(old_entry->path)+1);
-		strcpy(new_entry->path, old_entry->path);
-	}
+
+	new_entry->name = strdup(new_entry->name);
+
+	if(old_entry->path != NULL) new_entry->path = strdup(old_entry->path);
+
 	return new_entry;
 }
 
@@ -377,36 +402,66 @@ file_entry_t * next_file_entry(inode_t * inode, addr_t * addr) {
 
 void free_file_entry(file_entry_t * entry) {
 	free(entry->name);
+	free(entry->path);
 	free(entry);
 }
 
 
-file_entry_t * find_entry_internal_path(const char ** path, addr_t node_addr) {
+file_entry_t * find_entry_internal_path(const char ** path, int index, addr_t node_addr) {
 	inode_t inode = read_inode(node_addr);
 	if(!is_directory(&inode)) {
 		msfs_error = -ENOTDIR;
 		return NULL;
 	}
 
-	printf("Find entry (internal path): %s\n", path[0]);
+	//printf("Find entry (internal path): %s\n", path[index]);
 
-	file_entry_t * entry = find_entry_in_dir(path[0], &inode);
+	file_entry_t * entry = find_entry_in_dir(path[index], &inode);
 	if(entry == NULL) {
+		//printf(" not found\n");
 		msfs_error = -ENOENT;
 		return NULL;
-	} else if(path[1] == NULL) {
-		printf("Entry found\n");
-		//This was the last part of the path, return it:
-		return entry;
 	} else {
-		printf("Traversing directory tree \n");
-		//We need to go deeper!
-		file_entry_t * next = find_entry_internal_path(path + 1, entry->address);
-		free_file_entry(entry);
-		return next;
+		//printf(" found\n");
+		char * cache_path = join_path(path, index+1);
+		store_file_entry_in_cache(cache_path, entry);
+		free(cache_path);
+
+		return entry;
 	}
 }
 
+/*
+ * Tries to find a entry in the cache matching num_parts of path
+ */
+static file_entry_t * find_entry_in_cache(const char ** path, int num_parts) {
+	char * cache_path = join_path(path, num_parts);
+
+	//printf("Searching for %s in cache (%d parts)\n", cache_path, num_parts);
+	std::map<std::string, file_entry_t*>::iterator it = files.find(std::string(cache_path));
+
+	free(cache_path);
+
+	if(it != files.end()) {
+		//printf("Cache hit! (%s: %u)\n", it->first.c_str(), it->second->address);
+		return clone_entry(it->second);
+	} else if(num_parts > 0) {
+		file_entry_t * parent = find_entry_in_cache(path, num_parts - 1);
+
+		if(parent != NULL) {
+			file_entry_t * entry = find_entry_internal_path(path, num_parts - 1, parent->address);
+			free_file_entry(parent);
+
+			return entry;
+		} else {
+			return NULL;
+		}
+
+	} else {
+		printf("Critical error, file entry cache corrupted (missing /)\n");
+		abort();
+	}
+}
 
 static addr_t get_block_addr_from_inode(inode_t * inode, unsigned int block_index) {
 	unsigned int inode_index = block_index / INODE_BLOCKS;
@@ -547,6 +602,9 @@ void delete_file_entry(file_entry_t * file_entry) {
 	}
 	directory.attributes.st_size = next_write;
 	write_inode_data(&directory, 0, directory.attributes.st_size, data);
+
+	free(data);
+
 	write_inode(&directory);
 	--file.attributes.st_nlink;
 	if(is_directory(&file) || file.attributes.st_nlink == 0) {
@@ -711,6 +769,9 @@ static void delete_inode(inode_t * inode) {
 	delete_block(inode->attributes.st_ino);
 }
 
+/*
+ * @return Number of read bytes
+ */
 int read_inode_data(inode_t * inode, size_t offset, size_t size, char * data) {
 	if((unsigned int) (offset + size) > inode->attributes.st_size) {
 		size = inode->attributes.st_size - offset;
@@ -1006,6 +1067,7 @@ void format() {
 	add_file_entry(&entry, &inode);
 
 }
+
 void reset_error() { msfs_error = 0; }
 
 void print_fbl() {
