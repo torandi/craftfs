@@ -137,6 +137,11 @@ addr_t allocate_block();
 addr_t allocate_block_cont(addr_t prev); //Start at given addr
 void delete_block(addr_t addr);
 
+void rename_file(const char * from, const char * to);
+
+/* Empty all caches */
+void clear_cache();
+
 //Called on new systems to create initial structure
 void format();
 

@@ -66,7 +66,7 @@ int main(int argc, const char ** argv) {
 				if(msfs_error!=0) return msfs_error;
 
 				print_data(tmp_block, BLOCK_SIZE);
-			} else if(strcmp(argv[1], "inode") == 0) { //inspect inode
+			} else if(strncmp(argv[1], "ino", 3) == 0) { //inspect inode
 				if(argc < 3) {
 					printf("Missing argument: inode number\n");
 					return -1;

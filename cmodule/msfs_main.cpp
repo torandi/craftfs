@@ -21,6 +21,9 @@ int main(int argc, char ** argv) {
 		op.unlink = msfs_unlink;
 		op.rmdir = msfs_rmdir;
 		op.destroy = msfs_destroy;
+		op.rename = msfs_rename;
+		op.fsync = msfs_fsync;
+		op.fsyncdir = msfs_fsync;
 
 	return fuse_main(argc, argv, &op, NULL);
 }

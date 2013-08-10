@@ -19,12 +19,17 @@ int msfs_error = 0;
 
 static std::map<std::string, file_entry_t*> files;
 
+typedef std::map<std::string, file_entry_t*>::iterator file_cache_it_t;
+
 struct cache_entry {
 	addr_t addr;
 	char data[BLOCK_SIZE];
 	int valid;
 };
 
+/* Cache of addresses to the inode blocks for a inode
+ * That is, a cache of the linked list of inode blocks
+ */
 struct inode_cache_entry_t {
 	addr_t addr;
 	std::vector<addr_t> blocks;
@@ -62,10 +67,15 @@ static inode_t create_blank_inode(mode_t mode);
 static void delete_inode(inode_t * inode);
 static char * join_path(const char **split_path, int num_parts);
 
-static void store_file_entry_in_cache(char * path, file_entry_t * entry);
+static void clear_file_cache();
+
+/* Remove the given file entry from the directory
+ * Uncaches the entry, and everything down in the tree if recurse is true
+ */
+static void unlist_file_entry(file_entry_t * file_entry, inode_t * directory, int recursive);
 
 /*
- * An internal adress in an inode
+ * An internal address in an inode
  */
 struct inode_addr_t {
 	unsigned int block_index;
@@ -86,13 +96,20 @@ static char * block; //Always block_size big. Used for sending data that is less
 
 static char * blank_string;
 
-static cache_entry * find_or_create_cache_entry(addr_t address) {
+static cache_entry * find_block_cache_entry(addr_t address) {
 	for(int i = 0; i< CACHE_SIZE; ++i) {
 		if(address == block_cache[i].addr) {
 			return block_cache + i;
 		}
 	}
-	cache_entry * entry = &(block_cache[next_cache_entry_fill]);
+	return NULL;
+}
+
+static cache_entry * find_or_create_cache_entry(addr_t address) {
+	cache_entry * entry = find_block_cache_entry(address);
+	if(entry != NULL) return entry;
+
+	entry = &(block_cache[next_cache_entry_fill]);
 	entry->addr = address;
 	entry->valid = 0;
 	next_cache_entry_fill = ( next_cache_entry_fill + 1 ) % 10;
@@ -199,7 +216,7 @@ int init(const char * option, int verify) {
 }
 
 void cleanup() {
-	for(std::map<std::string, file_entry_t*>::iterator it = files.begin(); it != files.end(); ++it) {
+	for(file_cache_it_t it = files.begin(); it != files.end(); ++it) {
 		free_file_entry(it->second);
 	}
 	free(zeroes);
@@ -271,6 +288,8 @@ addr_t allocate_block_cont(addr_t prev) {
 }
 
 void delete_block(addr_t addr) {
+	cache_entry * entry = find_block_cache_entry(addr);
+	if(entry != NULL) entry->valid = 0;
 	mark_block(addr, 0);
 }
 
@@ -337,7 +356,6 @@ file_entry_t * find_entry(const char * in_path) {
 	char ** parts = NULL;
 	int num_parts = split_path(path + 1, &parts);
 
-	//file_entry_t * entry = find_entry_internal_path((const char**) parts, 0, ROOT_NODE);
 	file_entry_t * entry = find_entry_in_cache((const char**) parts, num_parts);
 
 	free(parts);
@@ -348,7 +366,7 @@ file_entry_t * find_entry(const char * in_path) {
 }
 
 static file_entry_t * find_entry_in_dir(const char * name, inode_t * inode) {
-	printf("Find entry in dir: %s in inode %lu\n", name, inode->attributes.st_ino);
+	printf("find_entry_in_dir(name: %s,inode: %lu)\n", name, inode->attributes.st_ino);
 	addr_t cur_addr = 0;
 	file_entry_t * entry = next_file_entry(inode, &cur_addr);
 	while(entry!=NULL) {
@@ -360,12 +378,6 @@ static file_entry_t * find_entry_in_dir(const char * name, inode_t * inode) {
 		entry = next_file_entry(inode, &cur_addr);
 	}
 	return NULL;
-}
-
-static void store_file_entry_in_cache(char * path, file_entry_t * entry) {
-	entry->path = strdup(path);
-	//printf("Writing result to cache (%s: %u)\n", path, entry->address);
-	files[std::string(path)] = clone_entry(entry);
 }
 
 file_entry_t * clone_entry(const file_entry_t * old_entry) {
@@ -386,6 +398,7 @@ file_entry_t * next_file_entry(inode_t * inode, addr_t * addr) {
 	file_entry_t * entry = (file_entry_t*) malloc(sizeof(file_entry_t));
 	read_inode_data(inode, *addr, (sizeof(addr_t) * 2), (char*)entry);
 	if(entry->len == 0) {
+		printf("Entry (NULL) : { %d, %d }\n", entry->len, entry->address);
 		free(entry);
 		return NULL;
 	} else {
@@ -418,14 +431,12 @@ file_entry_t * find_entry_internal_path(const char ** path, int index, addr_t no
 
 	file_entry_t * entry = find_entry_in_dir(path[index], &inode);
 	if(entry == NULL) {
-		//printf(" not found\n");
 		msfs_error = -ENOENT;
 		return NULL;
 	} else {
-		//printf(" found\n");
-		char * cache_path = join_path(path, index+1);
-		store_file_entry_in_cache(cache_path, entry);
-		free(cache_path);
+		assert(entry->path == NULL);
+		entry->path = join_path(path, index+1);
+		files[std::string(entry->path)] = clone_entry(entry);
 
 		return entry;
 	}
@@ -438,7 +449,7 @@ static file_entry_t * find_entry_in_cache(const char ** path, int num_parts) {
 	char * cache_path = join_path(path, num_parts);
 
 	//printf("Searching for %s in cache (%d parts)\n", cache_path, num_parts);
-	std::map<std::string, file_entry_t*>::iterator it = files.find(std::string(cache_path));
+	file_cache_it_t it = files.find(std::string(cache_path));
 
 	free(cache_path);
 
@@ -510,9 +521,9 @@ static addr_t get_block_addr_from_inode(inode_t * inode, unsigned int block_inde
 		addr_t prev = (relative_block_index > 0) ? block_node->block_addr[relative_block_index - 1] : prev_last;
 		addr = block_node->block_addr[relative_block_index] = allocate_block_cont(prev);
 		++(inode->attributes.st_blocks);
-		++(block_node->attributes.st_blocks);
 		inode_changed = 1;
 		if(block_node != inode) {
+			++(block_node->attributes.st_blocks);
 			write_inode(block_node);
 		}
 	}
@@ -578,21 +589,35 @@ void delete_file_entry(file_entry_t * file_entry) {
 	}
 
 	//Remove from directory listing:
+	unlist_file_entry(file_entry, &directory, 0);
 
-	char * data = (char*) malloc(directory.attributes.st_size);
+	--file.attributes.st_nlink;
+	if(( is_directory(&file) && file.attributes.st_nlink < 3) || file.attributes.st_nlink == 0) {
+		printf("Deleting inode for file %s\n", file_entry->name);
+		delete_inode(&file);
+	} else {
+		printf("Keeping inode for file %s (still got %lu links)\n", file_entry->name, file.attributes.st_nlink);
+		write_inode(&file);
+	}
+}
+
+static void unlist_file_entry(file_entry_t * file_entry, inode_t * directory, int recursive) {
+	printf("Removing file entry %s from inode %lu\n", file_entry->path, directory->attributes.st_ino);
+
+	char * data = (char*) malloc(directory->attributes.st_size);
 	addr_t next_read = 0;
 	addr_t next_write = 0;
 
 	file_entry_t * entry;
 
 	while( 1 ) {
-		read_inode_data(&directory, next_read, (sizeof(addr_t) * 2), data + next_write);
+		read_inode_data(directory, next_read, (sizeof(addr_t) * 2), data + next_write);
 		entry = (file_entry_t*) (data + next_write);
 		next_write += sizeof(addr_t) * 2;
 		next_read += sizeof(addr_t) * 2;
 		if(entry->len == 0) break;
 
-		read_inode_data(&directory, next_read, entry->len, data + next_write);
+		read_inode_data(directory, next_read, entry->len, data + next_write);
 		next_read += entry->len;
 		if(strncmp(data + next_write, file_entry->name, strlen(file_entry->name)) == 0) {
 			next_write -= sizeof(addr_t) * 2; //don't include this
@@ -600,25 +625,85 @@ void delete_file_entry(file_entry_t * file_entry) {
 			next_write += entry->len;
 		}
 	}
-	directory.attributes.st_size = next_write;
-	write_inode_data(&directory, 0, directory.attributes.st_size, data);
 
+	directory->attributes.st_size = next_write;
+
+	write_inode_data(directory, 0, directory->attributes.st_size, data);
+	write_inode(directory);
 	free(data);
 
-	write_inode(&directory);
-	--file.attributes.st_nlink;
-	if(is_directory(&file) || file.attributes.st_nlink == 0) {
-		delete_inode(&file);
+	clear_file_cache();
+}
+
+void rename_file(const char * from_path, const char * in_to_path) {
+	file_entry_t *  from_entry = find_entry(from_path);
+	inode_t from_dir, to_dir;
+	inode_t * target_dir;
+
+	if(from_entry  == NULL) return;
+
+	/* Find to */
+	assert(in_to_path[0] == '/');
+
+	char * to_path = copy_and_trim_path(in_to_path);
+
+	char ** to_parts = NULL;
+	int num_to_parts = split_path(to_path + 1, &to_parts);
+	char * new_name = to_parts[num_to_parts - 1];
+
+	file_entry_t * to_entry = find_entry_in_cache((const char**) to_parts, num_to_parts);
+
+	if(to_entry != NULL) {
+		msfs_error = -EEXIST;
+		goto rename_file_cleanup;
 	} else {
-		write_inode(&file);
+		reset_error();
 	}
 
-	if(file_entry->path != NULL) {
-		files.erase(file_entry->path); //nuke cache
+	to_entry = find_entry_in_cache((const char**) to_parts, num_to_parts - 1); /* Find parent of to */
+
+	if(to_entry == NULL) {
+		goto rename_file_cleanup;
 	}
+
+	from_dir = read_inode(from_entry->parent_inode);
+	to_dir = read_inode(to_entry->address);
+
+	if(!is_directory(&to_dir)) {
+		msfs_error = -ENOTDIR;
+		goto rename_file_full_cleanup;
+	}
+
+	unlist_file_entry(from_entry, &from_dir, 1);
+
+	file_entry_t new_file_entry;
+	new_file_entry.address = from_entry->address;
+	new_file_entry.len = strlen(new_name) + 1;
+	new_file_entry.name = new_name;
+	new_file_entry.path = NULL;
+
+	target_dir = &to_dir;
+
+	if(to_dir.attributes.st_ino == from_dir.attributes.st_ino) target_dir = &from_dir;
+
+	add_file_entry(&new_file_entry, target_dir);
+
+rename_file_full_cleanup:
+
+	free_file_entry(to_entry);
+
+rename_file_cleanup:
+
+	free_file_entry(from_entry);
+
+	free(to_parts);
+	free(to_path);
+
 }
 
 void add_file_entry(file_entry_t * file, inode_t * dir) {
+	printf("Add file entry (len: %u, addr: %u, name: %s) to inode %lu\n", file->len, file->address, file->name, dir->attributes.st_ino);
+
 	size_t cur_size = dir->attributes.st_size;
 	if(!is_directory(dir)) {
 		msfs_error = -ENOTDIR;
@@ -629,12 +714,14 @@ void add_file_entry(file_entry_t * file, inode_t * dir) {
 
 	write_inode_data(dir, cur_size, sizeof(addr_t)*2, (char*)file);
 
+	/*
 	file_entry_t test;
 	read_inode_data(dir, cur_size, sizeof(addr_t) * 2, (char*) &test);
 	if(test.len != file->len) {
 		printf("Error: read data: %u, %u\n", test.len, test.address);
 		abort();
 	}
+	*/
 
 	cur_size += sizeof(addr_t) * 2;
 	write_inode_data(dir, cur_size, file->len , file->name);
@@ -642,9 +729,10 @@ void add_file_entry(file_entry_t * file, inode_t * dir) {
 
 	//Add terminating null entry
 	write_inode_data(dir, cur_size, sizeof(addr_t)*2, zeroes);
-	//cur_size += sizeof(addr_t) * 2;
+	cur_size += sizeof(addr_t) * 2;
 
 	dir->attributes.st_mtime = time(NULL);
+	dir->attributes.st_size = cur_size;
 
 
 	write_inode(dir);
@@ -699,17 +787,18 @@ inode_t create_inode_from_path(const char * in_path, mode_t mode) {
 	else
 		dir = inode_from_path("/");
 
-	if(!check_access(&dir, O_CREAT)) {
-		msfs_error = -EPERM;
-		return inode;
-	}
-
 	if(msfs_error != 0) {
 		free(path);
 		return inode;
 	}
 
-	inode =  create_inode(&dir, last_slash, mode);
+	if(!check_access(&dir, O_CREAT)) {
+		msfs_error = -EPERM;
+		free(path);
+		return inode;
+	}
+
+	inode = create_inode(&dir, last_slash, mode);
 	free(path);
 	return inode;
 }
@@ -751,6 +840,7 @@ inode_t create_inode(inode_t * in_dir, const char* name, mode_t mode) {
 	file_entry.name = (char*) malloc(file_entry.len);
 	strcpy(file_entry.name,name);
 	add_file_entry(&file_entry, in_dir);
+	free(file_entry.name);
 
 	return inode;
 }
@@ -1088,4 +1178,33 @@ void print_fbl() {
 		}
 	}
 	printf("\n\n%llu blocks in use\n", in_use);
+}
+
+static void clear_file_cache() {
+	for(file_cache_it_t it = files.begin(); it != files.end(); ++it) {
+		free_file_entry(it->second);
+	}
+
+	files.clear();
+
+	file_entry_t tmp;
+	tmp.len = 2;
+	tmp.address = ROOT_NODE;
+	tmp.parent_inode = 0;
+	tmp.name = (char*)"/";
+	tmp.path = (char*)"/";
+
+	files["/"] = clone_entry(&tmp); //Always cache "/"
+}
+
+void clear_cache() {
+	for(int i = 0; i< CACHE_SIZE; ++i) {
+		block_cache[i].valid = 0;
+	}
+
+	for(int i = 0; i< INODE_INDEX_CACHE_SIZE; ++i) {
+		block_cache[i].valid = 0;
+	}
+
+	clear_file_cache();
 }

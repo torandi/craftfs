@@ -5,14 +5,17 @@
 #include "timer.h"
 
 static int msfs_getattr(const char *path, struct stat *stbuf) {
+	printf("msfs_getattr(%s)\n", path);
 	reset_error();
 	inode_t inode = inode_from_path(path);
 	if(msfs_error != 0) return msfs_error;
 	*stbuf = inode.attributes;
+	printf("msfs_getattr(%s), found.\n", path);
 	return 0;
 }
 
 static int msfs_opendir(const char * path, fuse_file_info * fi)  {
+	printf("msfs_opendir(%s)\n", path);
 	reset_error();
 	inode_t inode = inode_from_path(path);
 	if(msfs_error != 0) return msfs_error;
@@ -31,7 +34,6 @@ static int msfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off
 
 	bump_atime(&inode);
 
-	printf("Offset: %lu\n", offset);
 	addr_t addr = 0;
 	file_entry_t * entry;
 
@@ -47,6 +49,7 @@ static int msfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off
 }
 
 static int msfs_create(const char * path, mode_t mode, struct fuse_file_info * fi) {
+	printf("msfs_create(%s), mode: %u\n", path, mode);
 	reset_error();
 	inode_t inode = create_inode_from_path(path, mode);
 	if(msfs_error != 0) return msfs_error;
@@ -62,6 +65,7 @@ static int msfs_mkdir(const char * path, mode_t mode) {
 }
 
 static int msfs_open(const char *path, fuse_file_info *fi) {
+	printf("msfs_open(%s)\n", path);
 	reset_error();
 	inode_t inode = inode_from_path(path);
 	if(msfs_error != 0) return msfs_error;
@@ -74,6 +78,7 @@ static int msfs_open(const char *path, fuse_file_info *fi) {
 }
 
 static int msfs_ftruncate(const char * path, off_t off, struct fuse_file_info * fi) {
+	printf("msfs_ftruncate(%s)\n", path);
 	reset_error();
 	inode_t inode = read_inode((addr_t)fi->fh);
 	if(msfs_error != 0) return msfs_error;
@@ -84,6 +89,7 @@ static int msfs_ftruncate(const char * path, off_t off, struct fuse_file_info * 
 }
 
 static int msfs_read(const char *path, char *buf, size_t size, off_t offset, fuse_file_info *fi) {
+	printf("msfs_read(%s)\n", path);
 	reset_error();
 	inode_t inode = read_inode((addr_t)fi->fh);
 	if(msfs_error != 0) return msfs_error;
@@ -96,6 +102,7 @@ static int msfs_read(const char *path, char *buf, size_t size, off_t offset, fus
 }
 
 static int msfs_write(const char *path, const char *data, size_t size, off_t offset, fuse_file_info *fi) {
+	printf("msfs_write(%s)\n", path);
 	reset_error();
 	inode_t inode = read_inode((addr_t)fi->fh);
 	if(msfs_error != 0) return msfs_error;
@@ -121,6 +128,7 @@ static int msfs_rm (file_entry_t * entry, int recursive) {
 				ret = msfs_rm(file_entry, 1);
 				if(ret != 0) return ret;
 			}
+			free_file_entry(file_entry);
 		}
 	}
 
@@ -144,4 +152,16 @@ static int msfs_rmdir ( const char * path) {
 static void msfs_destroy(void * ptr) {
 	reset_error();
 	cleanup();
+}
+
+static int msfs_rename(const char * from, const char * to) {
+	reset_error();
+	rename_file(from, to);
+	return msfs_error;
+}
+
+static int msfs_fsync(const char *, int, struct fuse_file_info *) {
+	printf("SYNC!\n");
+	clear_cache();
+	return 0;
 }
